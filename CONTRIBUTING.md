@@ -27,18 +27,23 @@ on a machine with no GTK at all.
 ## Running the tests
 
 ```bash
-cargo test --workspace
+cargo test --workspace                          # needs the GTK dev packages
+cargo test                                      # without them: everything but the GUI
 cargo clippy --workspace --all-targets
 cargo clippy -p taix --features gui --all-targets
 cargo fmt --all --check
 ```
 
-CI runs all four. Clippy is clean at the time of writing, so a new warning is
-yours.
+CI runs the full set on every push. Clippy is clean at the time of writing,
+so a new warning is yours.
+
+Tests run as threads of one process, so anything reading `TZ` or an `XDG_*`
+path has to take `taix_core::testenv::lock` (or `redirect`) first. Two tests
+that skipped it were failing about one run in five on Ubuntu.
 
 ## Making a change
 
-1. Branch off `master`.
+1. Branch off `main`.
 2. Keep the change focused: one concern per pull request.
 3. Match the style already in the file you are editing.
 4. Update the README or docs if you changed behaviour anyone depends on.

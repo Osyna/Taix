@@ -23,7 +23,15 @@ desktop is the pane you scroll on the sofa.
 
 ## Quick start
 
-TaiX is not packaged anywhere yet. Build it:
+Download the static build — one file, no dependencies beyond `tmux`, runs on
+any glibc or musl distribution:
+
+```bash
+curl -fsSL https://github.com/Osyna/Taix/releases/latest/download/taix-x86_64-linux-musl.tar.gz | tar xz
+install -Dm755 taix ~/.local/bin/taix
+```
+
+Or build it:
 
 ```bash
 git clone https://github.com/Osyna/Taix.git
@@ -34,8 +42,8 @@ cargo build --release          # target/release/taix - the CLI and the TUI
 You need `tmux` on `PATH`. Then:
 
 ```bash
-./target/release/taix add ~/code/my-project
-./target/release/taix
+taix add ~/code/my-project
+taix
 ```
 
 You get the terminal UI with your project in the sidebar. Press `n` to open an
@@ -48,18 +56,38 @@ offers the ones that are actually on your `PATH`. Anything it does not know
 you add yourself in the config.
 
 <details>
-<summary>The desktop window</summary>
+<summary>The desktop window, and what each distribution needs</summary>
 
-The GTK front end is a separate binary and needs GTK 4, libadwaita and
-WebKitGTK 6 at build time:
+The GTK front end is a separate binary needing GTK 4.12, libadwaita 1.5 and
+WebKitGTK 6. A plain `cargo build` skips it, so the rest of the workspace
+compiles on a machine with no GTK at all.
+
+| | CLI + TUI | Desktop |
+|---|---|---|
+| Debian 13, Fedora 40+, Arch, openSUSE Tumbleweed | yes | yes |
+| Ubuntu 24.04 | yes | yes |
+| Debian 12, Ubuntu 22.04 | yes | no: GTK 4.8 / 4.6, libadwaita 1.2 / 1.1 |
+| Alpine, anything musl | yes (static build) | build it yourself |
+
+Verified by building and running on each: Debian 12 and 13, Ubuntu 22.04 and
+24.04, Fedora 42, Arch, Alpine 3.22.
 
 ```bash
+# Debian 13 / Ubuntu 24.04
+sudo apt install libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev tmux
+# Fedora
+sudo dnf install gtk4-devel libadwaita-devel webkitgtk6.0-devel tmux
+# Arch
+sudo pacman -S gtk4 libadwaita webkitgtk-6.0 tmux
+
 cargo build --release -p taix --features gui   # target/release/taix-gui
 taix --gui
 ```
 
-A plain `cargo build` deliberately skips it, so the rest of the workspace
-compiles on a machine with no GTK installed at all.
+The release also carries a prebuilt `taix-gui` for glibc 2.39 and newer.
+Building from source needs Rust 1.85 or newer (edition 2024): Debian 13,
+Fedora and Arch ship that, Ubuntu 24.04 and Debian 12 do not — use
+[rustup](https://rustup.rs) there.
 
 </details>
 
