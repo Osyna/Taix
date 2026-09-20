@@ -339,7 +339,8 @@ impl Cron {
 
 fn local(ts: i64) -> libc::tm {
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    let t = ts as libc::time_t;
+    // `localtime_r` names the width; `libc::time_t` is deprecated on musl.
+    let t = ts as _;
     unsafe { libc::localtime_r(&t, &mut tm) };
     tm
 }
