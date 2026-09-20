@@ -1066,11 +1066,12 @@ mod tests {
         assert!(parse("0 0 30 2 *").unwrap().next_after(0).is_none());
     }
 
-    /// One test owns `TZ`, because the environment is process-wide and
-    /// `jobs.rs` is the only code in `taix-core` that reads local time.
-    /// `libc` does not declare `tzset` on Linux, so this does.
+    /// `TZ` is process-wide and this test moves it. Every other test that
+    /// converts a local time has to take the same lock: being the only
+    /// writer does not help a reader running in another thread.
     #[test]
     fn civil_time_rules() {
+        let _env = crate::testenv::lock();
         unsafe extern "C" {
             fn tzset();
         }
@@ -1149,6 +1150,7 @@ mod tests {
 
     #[test]
     fn one_shot_fires_once() {
+        let _env = crate::testenv::lock();
         let store = Store::open_memory().unwrap();
         let proj = store
             .add_project("test", std::path::Path::new("/tmp/test"))

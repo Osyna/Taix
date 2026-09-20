@@ -17,6 +17,8 @@ pub mod stash;
 mod store;
 pub mod tailscale;
 pub mod terminal;
+#[cfg(test)]
+mod testenv;
 pub mod text;
 pub mod trace;
 mod watcher;

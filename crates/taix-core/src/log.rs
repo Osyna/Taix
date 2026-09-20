@@ -223,6 +223,7 @@ mod tests {
 
     #[test]
     fn log_append_and_rotation() {
+        let _env = crate::testenv::redirect("XDG_DATA_HOME", "log-append");
         let cfg = Config::default();
         let mut log = Log::open(&cfg, "test-proj", "test-win").unwrap();
 
@@ -249,16 +250,11 @@ mod tests {
         // Current file should be smaller than threshold after rotation
         let meta = fs::metadata(log.path()).unwrap();
         assert!(meta.len() < ROTATION_THRESHOLD);
-
-        // Cleanup
-        fs::remove_file(log.path()).unwrap();
-        let _ = fs::remove_file(&gen1);
-        let _ = fs::remove_file(log.path.with_extension("log.2"));
-        let _ = fs::remove_dir(log.path.parent().unwrap());
     }
 
     #[test]
     fn rotation_keeps_two_generations() {
+        let _env = crate::testenv::redirect("XDG_DATA_HOME", "log-rotation");
         let cfg = Config::default();
         let mut log = Log::open(&cfg, "rot-test", "window").unwrap();
 
@@ -282,10 +278,5 @@ mod tests {
         }
         assert!(gen1.exists());
         assert!(gen2.exists());
-
-        fs::remove_file(log.path()).unwrap();
-        let _ = fs::remove_file(&gen1);
-        let _ = fs::remove_file(&gen2);
-        let _ = fs::remove_dir(log.path.parent().unwrap());
     }
 }

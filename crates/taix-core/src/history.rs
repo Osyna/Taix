@@ -79,10 +79,8 @@ mod tests {
 
     #[test]
     fn replay_only_when_a_file_exists() {
-        // ponytail: one XDG_CACHE_HOME per test process is enough here.
-        let dir = std::env::temp_dir().join(format!("taix-hist-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("taix/history")).unwrap();
-        unsafe { std::env::set_var("XDG_CACHE_HOME", &dir) };
+        let env = crate::testenv::redirect("XDG_CACHE_HOME", "hist");
+        std::fs::create_dir_all(env.path().join("taix/history")).unwrap();
         assert_eq!(replaying(7, "claude"), "claude");
         std::fs::write(path(7), b"old\n").unwrap();
         let cmd = replaying(7, "claude");
@@ -91,6 +89,5 @@ mod tests {
         assert!(replaying(7, "").ends_with("exec \"${SHELL:-sh}\""));
         remove(7);
         assert_eq!(replaying(7, "claude"), "claude");
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

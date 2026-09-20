@@ -269,12 +269,7 @@ mod tests {
 
     #[test]
     fn missing_state_file_does_not_panic() {
-        let tmp = std::env::temp_dir().join(format!("taix-doctor-test-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
-
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", &tmp);
-        }
+        let _env = crate::testenv::redirect("XDG_DATA_HOME", "doctor");
 
         let cfg = Config {
             agents: Default::default(),
@@ -302,9 +297,5 @@ mod tests {
         let state_check = result.iter().find(|c| c.name == "state").unwrap();
         assert!(!state_check.ok);
         assert!(state_check.detail.contains("state.toml"));
-
-        unsafe {
-            std::env::remove_var("XDG_DATA_HOME");
-        }
     }
 }

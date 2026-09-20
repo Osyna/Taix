@@ -135,6 +135,7 @@ mod tests {
 
     #[test]
     fn snapshot_round_trip() {
+        let _env = crate::testenv::redirect("XDG_DATA_HOME", "session-round-trip");
         let cfg = Config::default();
         let snap = Snapshot {
             name: "test-session".into(),
@@ -173,6 +174,7 @@ mod tests {
 
     #[test]
     fn unknown_field_does_not_break_load() {
+        let _env = crate::testenv::redirect("XDG_DATA_HOME", "session-unknown-field");
         let cfg = Config::default();
         let d = dir(&cfg);
         fs::create_dir_all(&d).unwrap();
@@ -204,6 +206,7 @@ unknown_window_field = true
 
     #[test]
     fn dangerous_names_cannot_escape_directory() {
+        let _env = crate::testenv::redirect("XDG_DATA_HOME", "session");
         let cfg = Config::default();
         let snap = Snapshot {
             name: "../escape".into(),
