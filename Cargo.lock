@@ -1929,7 +1929,7 @@ dependencies = [
 
 [[package]]
 name = "taix"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "taix-core",
  "taix-git",
@@ -1941,7 +1941,7 @@ dependencies = [
 
 [[package]]
 name = "taix-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "serde",
@@ -1953,11 +1953,11 @@ dependencies = [
 
 [[package]]
 name = "taix-git"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "taix-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gtk4",
  "libadwaita",
@@ -1972,7 +1972,7 @@ dependencies = [
 
 [[package]]
 name = "taix-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1982,14 +1982,14 @@ dependencies = [
 
 [[package]]
 name = "taix-term"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "alacritty_terminal",
 ]
 
 [[package]]
 name = "taix-tmux"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nix 0.31.3",
  "parking_lot",
@@ -1997,7 +1997,7 @@ dependencies = [
 
 [[package]]
 name = "taix-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossterm",
  "ratatui",
@@ -2009,7 +2009,7 @@ dependencies = [
 
 [[package]]
 name = "taix-web"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "parking_lot",
  "serde",
