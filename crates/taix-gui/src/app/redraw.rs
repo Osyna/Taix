@@ -215,23 +215,29 @@ impl App {
                     }
                 }
                 None => {
-                    // O3: Batched capture via seed_many: find this pane's seed.
+                    // An unfocused pane is captured on the snapshot cadence,
+                    // so a frame between two captures has nothing new to
+                    // show. It used to fall through here with an empty
+                    // buffer and paint it: a pane in a project with more
+                    // than one window went black for up to SNAPSHOT_INTERVAL
+                    // every time its neighbour printed anything. Keep the
+                    // frame instead - the capture that follows is the paint.
+                    let Some(capture_idx) = to_capture.iter().position(|(idx, _)| *idx == row_idx)
+                    else {
+                        continue;
+                    };
                     row.dirty = false;
-                    if let Some(capture_idx) =
-                        to_capture.iter().position(|(idx, _)| *idx == row_idx)
-                    {
-                        if let Some(Some(seed)) = seeds.get(capture_idx) {
-                            let size = Size {
-                                cols: seed.cols,
-                                rows: seed.rows,
-                            };
-                            taix_term::snapshot(size, &seed.screen, &mut |chunk| {
-                                pango::push(&mut markup, chunk, None)
-                            });
-                        } else {
-                            taix_core::trace!("capture of pane {} failed", pane);
-                        }
-                    }
+                    let Some(Some(seed)) = seeds.get(capture_idx) else {
+                        taix_core::trace!("capture of pane {} failed", pane);
+                        continue;
+                    };
+                    let size = Size {
+                        cols: seed.cols,
+                        rows: seed.rows,
+                    };
+                    taix_term::snapshot(size, &seed.screen, &mut |chunk| {
+                        pango::push(&mut markup, chunk, None)
+                    });
                 }
             }
             // O1: Skip set_markup if unchanged.
