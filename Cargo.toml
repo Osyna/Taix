@@ -1,0 +1,59 @@
+[workspace]
+members = ["crates/*"]
+# A bare `cargo build` must work on a machine with no GTK installed at all.
+# `taix-gui` is still a workspace member, so `--workspace` and `cargo test`
+# cover it; it is just not built unless asked for.
+default-members = [
+    "crates/taix",
+    "crates/taix-core",
+    "crates/taix-git",
+    "crates/taix-mcp",
+    "crates/taix-term",
+    "crates/taix-tmux",
+    "crates/taix-tui",
+    "crates/taix-web",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+alacritty_terminal = "0.26.0"
+crossterm = "0.29.0"
+libc = "0.2"
+nix = { version = "0.31.3", features = ["term", "process"] }
+parking_lot = "0.12.5"
+ratatui = "0.30.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "1.1.5"
+
+taix-core = { path = "crates/taix-core" }
+taix-git = { path = "crates/taix-git" }
+taix-gui = { path = "crates/taix-gui" }
+taix-mcp = { path = "crates/taix-mcp" }
+taix-term = { path = "crates/taix-term" }
+taix-tmux = { path = "crates/taix-tmux" }
+taix-web = { path = "crates/taix-web" }
+taix-tui = { path = "crates/taix-tui" }
+
+# `panic = "abort"` drops the gimli/addr2line backtrace machinery (191 KiB)
+# and most of `.eh_frame` (204 KiB). Panic hooks still run, so the TUI's
+# terminal restore survives.
+#
+# `opt-level` is "s", not "z". Measured with `cargo run --release --example
+# feed_throughput -p taix-term`, which pushes ANSI through the render path:
+#   opt-level  binary   feed throughput
+#   3 (default) 1.19 MB  271 MiB/s
+#   "s"         0.99 MB  253 MiB/s   <- 17% smaller for 7% slower
+#   "z"         0.96 MB  123 MiB/s   <- 19% smaller for 55% slower
+# "z" halves the hot path for a further 30 KiB, which is not a trade worth
+# making on the one loop that scales with how chatty the agents are.
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = true

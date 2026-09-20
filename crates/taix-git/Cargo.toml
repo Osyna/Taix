@@ -1,0 +1,7 @@
+[package]
+name = "taix-git"
+version.workspace = true
+edition.workspace = true
+description = "Git worktree lifecycle for agent isolation. No UI dependencies."
+
+[dependencies]

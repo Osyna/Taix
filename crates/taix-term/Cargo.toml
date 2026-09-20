@@ -1,0 +1,8 @@
+[package]
+name = "taix-term"
+version.workspace = true
+edition.workspace = true
+description = "Headless terminal grid to styled runs. No UI dependencies."
+
+[dependencies]
+alacritty_terminal.workspace = true

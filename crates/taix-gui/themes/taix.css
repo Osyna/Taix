@@ -1,0 +1,30 @@
+/* TaiX. The house palette: near-black glass, teal accent, amber for anything
+   that wants you. Every hex here is from the design comp, not invented. */
+@define-color taix_bg        #0e1115;
+@define-color taix_bg_alt    #12161a;
+@define-color taix_pane_bg   #0a0c10;
+@define-color taix_fg        #d7dde3;
+@define-color taix_dim       #6b747c;
+@define-color taix_border    #242a30;
+@define-color taix_accent    #7ad6bd;
+@define-color taix_working   #7ad6bd;
+@define-color taix_waiting   #e0b46c;
+@define-color taix_failed    #ef8f8f;
+@define-color taix_done      #6fb2ff;
+@define-color taix_idle      #7f8b94;
+
+/* The three glows behind the glass. Each palette names its own so a light
+   theme is not lit from below by teal and violet. */
+@define-color taix_glow_a #1d3b3a;
+@define-color taix_glow_b #2a2740;
+@define-color taix_glow_c #14262c;
+@define-color taix_void   #08090c;
+
+@define-color taix_tint_red    #ef8f8f;
+@define-color taix_tint_orange #e8a06a;
+@define-color taix_tint_yellow #e0b46c;
+@define-color taix_tint_green  #8fd18a;
+@define-color taix_tint_teal   #7ad6bd;
+@define-color taix_tint_blue   #6fb2ff;
+@define-color taix_tint_purple #b8a4f0;
+@define-color taix_tint_pink   #e9a0c8;

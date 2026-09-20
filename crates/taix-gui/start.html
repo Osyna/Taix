@@ -1,0 +1,117 @@
+<!doctype html>
+<!-- The browser panel's landing page. `$bg` and friends are substituted from
+     the installed TaiX palette by `browser.rs`, so this follows the theme the
+     way every widget does. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TaiX</title>
+<style>
+  :root {
+    --bg: $bg;
+    --fg: $fg;
+    --dim: $dim;
+    --accent: $accent;
+    --border: $border;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    /* The window's own look: glass over two coloured glows, mixed from the
+       accent so a light palette is not lit from below by a dark one. */
+    background:
+      radial-gradient(70% 55% at 12% -5%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 70%),
+      radial-gradient(60% 45% at 105% 108%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 70%),
+      var(--bg);
+    color: var(--fg);
+    font-family: "IBM Plex Sans", "Inter", "Cantarell", system-ui, sans-serif;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 28px;
+  }
+  main { width: 100%; max-width: 460px; }
+  .mark {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-family: "JetBrains Mono", "Adwaita Mono", monospace;
+    font-size: 9.5px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+  .mark::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 14px var(--accent);
+  }
+  h1 { margin: 16px 0 8px; font-size: 25px; font-weight: 500; letter-spacing: -0.01em; }
+  .lead { margin: 0 0 24px; color: var(--dim); font-size: 13px; line-height: 1.55; }
+  kbd {
+    font-family: "JetBrains Mono", "Adwaita Mono", monospace;
+    font-size: 11.5px;
+    color: var(--fg);
+    background: color-mix(in srgb, var(--fg) 7%, transparent);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1px 5px;
+  }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+  a.card {
+    display: block;
+    padding: 11px 13px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--fg) 4%, transparent);
+    text-decoration: none;
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+  a.card:hover {
+    background: color-mix(in srgb, var(--accent) 13%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  a.card .where {
+    font-family: "JetBrains Mono", "Adwaita Mono", monospace;
+    font-size: 12.5px;
+    color: var(--accent);
+  }
+  a.card .what { display: block; margin-top: 3px; font-size: 11px; color: var(--dim); }
+  footer { margin-top: 22px; font-size: 11px; color: var(--dim); }
+</style>
+</head>
+<body>
+<main>
+  <div class="mark">TaiX &middot; browser</div>
+  <h1>Where to?</h1>
+  <p class="lead">
+    Type an address in the bar above &mdash; a host, a path like
+    <kbd>/tmp/report.html</kbd>, or anything else to search. Or open a dev
+    server one of your agents may have started:
+  </p>
+  <div class="grid">
+    <a class="card" href="http://localhost:3000">
+      <span class="where">localhost:3000</span>
+      <span class="what">Next.js, CRA, Rails</span>
+    </a>
+    <a class="card" href="http://localhost:5173">
+      <span class="where">localhost:5173</span>
+      <span class="what">Vite</span>
+    </a>
+    <a class="card" href="http://localhost:8000">
+      <span class="where">localhost:8000</span>
+      <span class="what">Django, FastAPI, http.server</span>
+    </a>
+    <a class="card" href="http://localhost:8080">
+      <span class="where">localhost:8080</span>
+      <span class="what">Go, Java, everything else</span>
+    </a>
+  </div>
+  <footer>Right-click the page for the developer console.</footer>
+</main>
+</body>
+</html>

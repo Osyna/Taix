@@ -1,0 +1,29 @@
+/* Catppuccin Latte. Same token names as every other theme; see theme.rs. */
+@define-color taix_bg        #eff1f5;
+@define-color taix_bg_alt    #e6e9ef;
+@define-color taix_pane_bg   #ffffff;
+@define-color taix_fg        #4c4f69;
+@define-color taix_dim       #6c6f85;
+@define-color taix_border    #ccd0da;
+@define-color taix_accent    #1e66f5;
+@define-color taix_working   #40a02b;
+@define-color taix_waiting   #df8e1d;
+@define-color taix_failed    #d20f39;
+@define-color taix_done      #179299;
+@define-color taix_idle      #9ca0b0;
+
+/* Window tints; see the mocha palette for the token contract. */
+@define-color taix_tint_red    #d20f39;
+@define-color taix_tint_orange #fe640b;
+@define-color taix_tint_yellow #df8e1d;
+@define-color taix_tint_green  #40a02b;
+@define-color taix_tint_teal   #179299;
+@define-color taix_tint_blue   #1e66f5;
+@define-color taix_tint_purple #8839ef;
+@define-color taix_tint_pink   #ea76cb;
+
+/* Glows: none. The palette is flat by design, so the glass sits on its own bg. */
+@define-color taix_glow_a @taix_bg;
+@define-color taix_glow_b @taix_bg;
+@define-color taix_glow_c @taix_bg;
+@define-color taix_void   @taix_bg;

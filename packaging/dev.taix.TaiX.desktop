@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=TaiX
+Comment=Orchestrate AI coding agents on one tmux server
+Exec=taix-gui
+Icon=utilities-terminal
+Terminal=false
+Categories=Development;
+Keywords=tmux;agent;terminal;
+StartupWMClass=dev.taix.TaiX

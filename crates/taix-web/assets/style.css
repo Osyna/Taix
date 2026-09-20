@@ -1,0 +1,2745 @@
+/* TaiX web — near-black glass, teal accent, monospace facts.
+
+   Two layouts out of one document: a laptop gets the rail, the sidebar,
+   the stage and the status rail side by side; a phone gets one of them at
+   a time, chosen by `html[data-view]`, with a dock at the bottom. Nothing
+   below is duplicated per layout except where the shapes genuinely
+   differ. */
+
+/* ===== palette ===== */
+:root {
+  --void: #080b0d;
+  --bg: #0d1115;
+  --bg-head: #0b0f12;
+  --bg-alt: #12181c;
+  --bg-input: #101519;
+  --bg-raise: #161d22;
+  --pane-bg: #0a0e11;
+
+  --fg: #d8dde3;
+  --fg-2: #a8b1b8;
+  --dim: #8b949c;
+  --dim-2: #6c737c;
+  --faint: #5c646b;
+
+  --hairline: #1a2126;
+  --border: #1e262c;
+  --border-2: #232a30;
+
+  --accent: #7ad6be;
+  --accent-2: #a5e7d6;
+  --accent-deep: #3f8d7c;
+  --accent-ink: #07120f;
+  --accent-soft: #15201e;
+  --accent-line: #27423b;
+
+  --working: #7ad6be;
+  --waiting: #d8dde3;
+  --starting: #e0b46c;
+  --done: #7ad6be;
+  --failed: #d1706e;
+  --idle: #4a5259;
+
+  --red: #d1706e;
+  --orange: #e8a06a;
+  --yellow: #e0b46c;
+  --green: #8fd18a;
+  --teal: #7ad6be;
+  --blue: #6fb2ff;
+  --purple: #b8a4f0;
+  --pink: #e9a0c8;
+
+  /* Terminal palette (xterm 256-colour BASE16) */
+  --term-0: #000000;
+  --term-1: #cd0000;
+  --term-2: #00cd00;
+  --term-3: #cdcd00;
+  --term-4: #0000ee;
+  --term-5: #cd00cd;
+  --term-6: #00cdcd;
+  --term-7: #e5e5e5;
+  --term-8: #7f7f7f;
+  --term-9: #ff0000;
+  --term-10: #00ff00;
+  --term-11: #ffff00;
+  --term-12: #5c5cff;
+  --term-13: #ff00ff;
+  --term-14: #00ffff;
+  --term-15: #ffffff;
+
+  --surface: rgba(216, 221, 227, 0.035);
+  --surface-hover: rgba(216, 221, 227, 0.06);
+  --surface-active: rgba(216, 221, 227, 0.09);
+  --glow-teal: #1d3b3a;
+
+  --sans: "IBM Plex Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --code: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --rail-w: 56px;
+  --side-w: 268px;
+  --panel-w: 360px;
+  --info-w: 264px;
+}
+
+/* ===== base ===== */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  height: 100%;
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--fg);
+  background: var(--void);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Pan only: no browser pinch-zoom anywhere on the page. The terminal
+     zooms itself, from its own touch handlers in `term.js`. */
+  touch-action: pan-x pan-y;
+  overflow: hidden;
+}
+
+body {
+  /* Pinned to what the phone can actually see. iOS lays the keyboard over
+     the page instead of resizing it, so `100%` would put the key row and
+     the prompt underneath it; and it scrolls the layout viewport to show
+     a focused field, which `top` follows. Both come from `visualViewport`,
+     set by `term.js`. */
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: var(--vv-top, 0px);
+  height: var(--vh, 100%);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+  /* No double-tap zoom (300ms on every tap), and no pull-to-refresh: a
+     reload drops the event stream and with it this page's claim. */
+  touch-action: pan-x pan-y;
+  overscroll-behavior: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  outline: none;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: var(--accent-line);
+}
+
+input[type="search"]::-webkit-search-decoration,
+input[type="search"]::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-2);
+  border-radius: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#sprite {
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+
+/* ===== utility ===== */
+.mono {
+  font-family: var(--code);
+  font-size: 0.92em;
+}
+
+.dim {
+  color: var(--dim);
+}
+
+.grow {
+  flex: 1;
+}
+
+.ico {
+  display: block;
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+  flex: 0 0 auto;
+}
+
+img.ico {
+  fill: none;
+  opacity: 0.95;
+}
+
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  color: var(--dim);
+  transition: background 140ms var(--ease), color 140ms var(--ease);
+}
+
+.icon:hover {
+  background: var(--surface-hover);
+  color: var(--fg);
+}
+
+.accent {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 14px;
+  height: 32px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-radius: 9px;
+  font-size: 12.5px;
+  font-weight: 600;
+  transition: background 140ms var(--ease);
+}
+
+.accent:hover {
+  background: var(--accent-2);
+}
+
+.ghost-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--dim);
+  font-size: 12.5px;
+}
+
+.ghost-btn:hover {
+  color: var(--fg);
+  border-color: var(--border-2);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--dim);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.chip:hover {
+  color: var(--fg);
+}
+
+.chip.on,
+.on > .chip {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+.danger {
+  color: var(--red);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--accent-line);
+  border-radius: 6px;
+  color: var(--accent);
+  font-family: var(--code);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.badge:empty {
+  display: none;
+}
+
+.badge.bad {
+  border-color: color-mix(in srgb, var(--red) 45%, transparent);
+  color: var(--red);
+}
+
+.badge.quiet {
+  border-color: var(--border-2);
+  color: var(--dim-2);
+}
+
+/* The one shape that says what a terminal is doing, everywhere it is
+   said: sidebar row, tab, pane head, sheet. */
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--idle);
+  flex: 0 0 auto;
+}
+
+.dot.working,
+.dot.done {
+  background: var(--working);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--working) 55%, transparent);
+}
+
+.dot.starting {
+  background: var(--starting);
+}
+
+.dot.failed {
+  background: var(--failed);
+}
+
+.dot.waiting {
+  background: var(--waiting);
+  animation: ring 2s infinite;
+}
+
+@keyframes ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(216, 221, 227, 0.4);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(216, 221, 227, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(216, 221, 227, 0);
+  }
+}
+
+.meter {
+  height: 3px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+/* A job that is running has no percentage to report, so the bar says
+   "moving" instead of lying about how far along it is. */
+.meter-fill.p-pulse {
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+}
+
+/* ===== glow ===== */
+#glow {
+  position: fixed;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: radial-gradient(circle at 50% 18%, var(--glow-teal) 0%, transparent 45%);
+  opacity: 0.07;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ===== header ===== */
+#top {
+  position: relative;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 56px;
+  padding: 0 14px;
+  background: var(--bg-head);
+  border-bottom: 1px solid var(--hairline);
+  flex: 0 0 auto;
+}
+
+#brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+#mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: linear-gradient(140deg, var(--accent), var(--accent-deep));
+  color: var(--accent-ink);
+  font-family: var(--code);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+#brand-text {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+#brand-text b {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+#host {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 7px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  color: var(--dim);
+  font-size: 11px;
+}
+
+#host::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+#host:empty {
+  display: none;
+}
+
+#crumb {
+  display: none;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  line-height: 1.25;
+}
+
+#crumb-name {
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#crumb-sub {
+  color: var(--dim-2);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#omni {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 440px;
+  height: 34px;
+  margin: 0 auto;
+  padding: 0 12px;
+  border-radius: 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--dim-2);
+  text-align: left;
+  transition: border-color 140ms var(--ease);
+}
+
+#omni:hover {
+  border-color: var(--border-2);
+}
+
+#omni-text {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#omni kbd {
+  padding: 2px 5px;
+  border: 1px solid var(--border-2);
+  border-radius: 5px;
+  font-size: 10px;
+  color: var(--dim-2);
+}
+
+#notice {
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: var(--bg-alt);
+  color: var(--dim);
+  font-size: 11px;
+  max-width: 28ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#notice:empty {
+  display: none;
+}
+
+#attn {
+  border-color: var(--border-2);
+  color: var(--fg);
+}
+
+#attn .dot {
+  background: var(--waiting);
+  animation: ring 2s infinite;
+}
+
+#facts-top {
+  color: var(--dim-2);
+  font-size: 10.5px;
+}
+
+#facts-top:empty {
+  display: none;
+}
+
+#nav {
+  display: none;
+}
+
+#nav .bars,
+#nav .bars::before,
+#nav .bars::after {
+  display: block;
+  width: 16px;
+  height: 1.5px;
+  background: currentColor;
+  border-radius: 2px;
+}
+
+#nav .bars {
+  position: relative;
+}
+
+#nav .bars::before,
+#nav .bars::after {
+  content: "";
+  position: absolute;
+  left: 0;
+}
+
+#nav .bars::before {
+  top: -5px;
+}
+
+#nav .bars::after {
+  top: 5px;
+}
+
+/* ===== body columns ===== */
+#body {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ===== section rail ===== */
+#rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: var(--rail-w);
+  padding: 10px 0;
+  background: var(--bg-head);
+  border-right: 1px solid var(--hairline);
+  flex: 0 0 auto;
+}
+
+#rail button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  color: var(--dim-2);
+  transition: background 140ms var(--ease), color 140ms var(--ease);
+}
+
+#rail button:hover {
+  background: var(--surface-hover);
+  color: var(--fg);
+}
+
+#rail button.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+#rail .grow {
+  flex: 1;
+}
+
+/* ===== sidebar ===== */
+#side {
+  display: flex;
+  flex-direction: column;
+  width: var(--side-w);
+  background: var(--bg);
+  border-right: 1px solid var(--hairline);
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
+#side-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid var(--hairline);
+  flex: 0 0 auto;
+}
+
+#side-search {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 1;
+  height: 34px;
+  padding: 0 11px;
+  border-radius: 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--dim-2);
+  min-width: 0;
+}
+
+#side-search:focus-within {
+  border-color: var(--accent-line);
+}
+
+#filter {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  background: none;
+  font-size: 12.5px;
+}
+
+#filter::placeholder {
+  color: var(--faint);
+}
+
+#add-project {
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--border);
+  background: var(--bg-alt);
+  color: var(--dim);
+}
+
+#home-top {
+  flex: 0 0 auto;
+}
+
+#home-top:empty {
+  display: none;
+}
+
+#projects {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-bottom: 14px;
+}
+
+/* The one card that matters on a phone at arm's length: who is blocked,
+   and one button that goes there and takes the keyboard. */
+.attn-card {
+  margin: 12px;
+  padding: 13px 14px;
+  background: var(--bg-raise);
+  border: 1px solid #2c3a3d;
+  border-radius: 14px;
+}
+
+.attn-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.attn-who {
+  display: block;
+  margin: 6px 0 11px;
+  color: var(--dim-2);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attn-go {
+  width: 100%;
+  height: 40px;
+  border-radius: 10px;
+  font-size: 13.5px;
+}
+
+.chips {
+  display: flex;
+  gap: 8px;
+  padding: 0 12px 12px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.chips::-webkit-scrollbar {
+  display: none;
+}
+
+.chip-tab {
+  height: 32px;
+  padding: 0 13px;
+  border-radius: 9px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  color: var(--dim);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.chip-tab.on {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+/* ===== projects ===== */
+.proj {
+  border-bottom: 1px solid var(--hairline);
+}
+
+.proj-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px 10px 4px;
+  cursor: pointer;
+  transition: background 120ms var(--ease);
+}
+
+.proj-head:hover {
+  background: var(--surface);
+}
+
+.chevron {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: var(--dim-2);
+  font-size: 9px;
+  transition: transform 140ms var(--ease);
+}
+
+.proj.folded .chevron {
+  transform: rotate(-90deg);
+}
+
+.proj-info {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+
+.proj-name {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proj-path {
+  display: block;
+  color: var(--dim-2);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proj-count {
+  min-width: 22px;
+  height: 20px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--dim);
+  font-family: var(--code);
+  font-size: 10.5px;
+}
+
+.proj-menu,
+.win-tools {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  color: var(--dim-2);
+  opacity: 0;
+  transition: opacity 120ms var(--ease), background 120ms var(--ease);
+}
+
+.proj-head:hover .proj-menu,
+.win:hover .win-tools,
+.proj-menu:focus-visible,
+.win-tools:focus-visible {
+  opacity: 1;
+}
+
+.proj-menu:hover,
+.win-tools:hover {
+  background: var(--surface-hover);
+  color: var(--fg);
+}
+
+/* A finger has no hover: the dots are simply there, big enough to hit. */
+@media (hover: none) {
+  .proj-menu,
+  .win-tools {
+    opacity: 1;
+    width: 34px;
+    height: 34px;
+  }
+}
+
+.proj.folded .win,
+.proj.folded .new-term {
+  display: none;
+}
+
+
+/* A folded project still has to say a browser is typing inside it. */
+.row-remote {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 60%, transparent);
+  flex: 0 0 auto;
+}
+/* ===== window rows ===== */
+.win {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 46px;
+  padding: 7px 8px 7px 12px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 120ms var(--ease);
+}
+
+.win:hover {
+  background: var(--surface);
+}
+
+.win.focused {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+
+.win-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.win-icon .ico {
+  width: 14px;
+  height: 14px;
+}
+
+.win-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.win-name {
+  display: block;
+  color: var(--fg-2);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.win.focused .win-name,
+.win.attention .win-name {
+  color: var(--fg);
+}
+
+.win-subtitle {
+  display: block;
+  color: var(--faint);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The keyboard mark: which windows this phone is driving, in the one
+   place that lists them all. */
+.win.driving .win-name::after {
+  content: " ⌨";
+  color: var(--accent);
+}
+
+.win-quick {
+  display: flex;
+  gap: 4px;
+}
+
+.quick {
+  min-width: 30px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-alt);
+  color: var(--dim);
+  font-family: var(--code);
+  font-size: 11px;
+}
+
+.quick:hover {
+  color: var(--accent);
+  border-color: var(--accent-line);
+}
+
+.new-term {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 40px;
+  padding: 0 12px 0 32px;
+  color: var(--accent);
+  font-size: 13px;
+  text-align: left;
+}
+
+.new-term:hover {
+  background: var(--surface);
+}
+
+/* ===== stage ===== */
+#stage {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--bg);
+}
+
+#stage-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 16px 18px 0;
+  flex: 0 0 auto;
+}
+
+#stage-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+#stage-name {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#stage-sub {
+  grid-column: 1;
+  color: var(--dim-2);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#layout {
+  grid-row: 1 / 3;
+  grid-column: 2;
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+
+#layout button {
+  height: 24px;
+  padding: 0 12px;
+  border-radius: 7px;
+  color: var(--dim-2);
+  font-size: 12px;
+}
+
+#layout button.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* ===== window tabs ===== */
+#wins {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 18px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex: 0 0 auto;
+}
+
+#wins::-webkit-scrollbar {
+  display: none;
+}
+
+#wins:empty {
+  display: none;
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 11px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--dim);
+  font-size: 12.5px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.tab:hover {
+  color: var(--fg);
+}
+
+.tab.on {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  color: var(--fg);
+}
+
+.tab.attn {
+  border-color: #3d454b;
+}
+
+.tab.proj {
+  background: transparent;
+  border-color: var(--hairline);
+  color: var(--dim-2);
+  font-weight: 500;
+}
+
+.tab.add {
+  width: 32px;
+  padding: 0;
+  justify-content: center;
+  color: var(--dim-2);
+}
+
+.tab-name {
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-x {
+  margin-right: -4px;
+  padding: 0 4px;
+  color: var(--dim-2);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.tab-x:hover {
+  color: var(--fg);
+}
+
+/* ===== panes ===== */
+#grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  padding: 0 18px 18px;
+  overflow: auto;
+  min-height: 0;
+  /* Panning stays the browser's, zooming does not: a pinch here changes
+     the terminal font (`term.js`), and leaving `pinch-zoom` in this list
+     would scale the whole page underneath it as well. */
+  touch-action: pan-x pan-y;
+}
+
+#grid[data-layout="split"] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+#grid[data-layout="grid"] {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr));
+  grid-auto-rows: minmax(220px, 1fr);
+}
+
+.pane {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--pane-bg);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  overflow: hidden;
+  transition: border-color 160ms var(--ease);
+}
+
+.pane.mine {
+  border-color: var(--accent-line);
+}
+
+.pane.zoomed {
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+}
+
+.pane-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 36px;
+  padding: 0 10px 0 12px;
+  background: var(--bg-head);
+  border-bottom: 1px solid var(--hairline);
+  flex: 0 0 auto;
+}
+
+.pane-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-meta {
+  color: var(--faint);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid #243039;
+  border-radius: 7px;
+  background: var(--bg-alt);
+  color: var(--accent);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.pane-tool:hover {
+  border-color: var(--accent-line);
+}
+
+.pane-tool.icon {
+  width: 26px;
+  padding: 0;
+  color: var(--dim-2);
+}
+
+.pane-tool.icon:hover {
+  color: var(--fg);
+}
+
+.pane-body {
+  flex: 1;
+  position: relative;
+  overflow: auto;
+  padding: 12px 14px;
+}
+
+.pane-start {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  height: 100%;
+  color: var(--dim);
+}
+
+/* One tap back to the live bottom, floating over the output: it is the
+   only control a pane needs while you are reading it. */
+.pane-live {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  z-index: 5;
+  height: 30px;
+  padding: 0 13px;
+  display: inline-flex;
+  align-items: center;
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+}
+
+.screen {
+  font-family: var(--code);
+  /* Set by `term.js`: the base size times the user's pinch zoom. The grid
+     is cut to fit this, not the other way around. */
+  font-size: var(--term-font-size, 13px);
+  line-height: 1.3;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: keep-all;
+}
+
+.screen .b {
+  font-weight: 700;
+}
+
+.screen .i {
+  font-style: italic;
+}
+
+.screen .u {
+  text-decoration: underline;
+}
+
+.screen .s {
+  text-decoration: line-through;
+}
+
+/* Palette colours (standard 16) emitted as short classes to shrink SSE frames. */
+.screen .f0 { color: var(--term-0); }
+.screen .f1 { color: var(--term-1); }
+.screen .f2 { color: var(--term-2); }
+.screen .f3 { color: var(--term-3); }
+.screen .f4 { color: var(--term-4); }
+.screen .f5 { color: var(--term-5); }
+.screen .f6 { color: var(--term-6); }
+.screen .f7 { color: var(--term-7); }
+.screen .f8 { color: var(--term-8); }
+.screen .f9 { color: var(--term-9); }
+.screen .f10 { color: var(--term-10); }
+.screen .f11 { color: var(--term-11); }
+.screen .f12 { color: var(--term-12); }
+.screen .f13 { color: var(--term-13); }
+.screen .f14 { color: var(--term-14); }
+.screen .f15 { color: var(--term-15); }
+.screen .b0 { background: var(--term-0); }
+.screen .b1 { background: var(--term-1); }
+.screen .b2 { background: var(--term-2); }
+.screen .b3 { background: var(--term-3); }
+.screen .b4 { background: var(--term-4); }
+.screen .b5 { background: var(--term-5); }
+.screen .b6 { background: var(--term-6); }
+.screen .b7 { background: var(--term-7); }
+.screen .b8 { background: var(--term-8); }
+.screen .b9 { background: var(--term-9); }
+.screen .b10 { background: var(--term-10); }
+.screen .b11 { background: var(--term-11); }
+.screen .b12 { background: var(--term-12); }
+.screen .b13 { background: var(--term-13); }
+.screen .b14 { background: var(--term-14); }
+.screen .b15 { background: var(--term-15); }
+
+.screen .cur {
+  background: var(--accent);
+  color: var(--pane-bg);
+}
+
+/* The line staged in the composer, drawn at the prompt it will be sent
+   to. Local only: nothing here has left the phone. */
+.ghost {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+#stage-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  flex: 1;
+  color: var(--dim);
+}
+
+/* ===== panel ===== */
+#panel {
+  display: flex;
+  flex-direction: column;
+  width: var(--panel-w);
+  background: var(--bg);
+  border-left: 1px solid var(--hairline);
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
+#panel-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 48px;
+  padding: 0 10px 0 16px;
+  border-bottom: 1px solid var(--hairline);
+  flex: 0 0 auto;
+}
+
+#panel-title {
+  font-family: var(--code);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dim-2);
+}
+
+#panel-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#panel-body {
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+  min-height: 0;
+}
+
+.panel-card {
+  margin-bottom: 10px;
+  padding: 12px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.panel-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 9px;
+  font-family: var(--code);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dim-2);
+}
+
+.panel-label > .v {
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--fg);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 4px 0;
+}
+
+.row-main {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-sub {
+  display: block;
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+.row-tools {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.info-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+}
+
+.info-row .k {
+  color: var(--dim-2);
+  font-size: 12px;
+}
+
+.info-row .v {
+  color: var(--fg);
+  font-size: 12px;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.info-row .v.teal {
+  color: var(--accent);
+}
+
+.info-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.info-bar .meter {
+  margin-top: 5px;
+}
+
+.info-btns {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.info-btns .chip {
+  flex: 1;
+  height: 28px;
+  justify-content: center;
+  color: var(--fg);
+}
+
+.crumbs {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  gap: 4px;
+  margin: -12px -12px 8px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--hairline);
+  overflow-x: auto;
+  scrollbar-width: none;
+  white-space: nowrap;
+}
+
+.crumbs::-webkit-scrollbar {
+  display: none;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 8px;
+  border-radius: 9px;
+  text-align: left;
+}
+
+.tree-row:hover {
+  background: var(--surface);
+}
+
+.tree-row.dir .row-main {
+  font-weight: 500;
+}
+
+.diff {
+  margin: 0;
+  padding: 10px;
+  background: var(--pane-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-family: var(--code);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.diff mark {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.diff .add {
+  color: var(--green);
+}
+
+.diff .del {
+  color: var(--red);
+}
+
+.diff .hunk {
+  color: var(--dim);
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 40px;
+}
+
+.field > label {
+  color: var(--dim);
+  font-size: 12.5px;
+}
+
+.field input,
+.field select {
+  height: 30px;
+  padding: 0 9px;
+  font-size: 12.5px;
+  max-width: 55%;
+}
+
+.field input[type="range"] {
+  padding: 0;
+  border: none;
+  background: none;
+  accent-color: var(--accent);
+}
+
+/* The control *is* the checkbox: a label plus a styled box needs no
+   wrapper element and stays keyboard-reachable for free. */
+.field.switch input[type="checkbox"] {
+  position: relative;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 40px;
+  height: 24px;
+  max-width: none;
+  padding: 0;
+  border-radius: 999px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  flex: 0 0 auto;
+  transition: background 140ms var(--ease), border-color 140ms var(--ease);
+}
+
+.field.switch input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--dim-2);
+  transition: transform 140ms var(--ease), background 140ms var(--ease);
+}
+
+.field.switch input[type="checkbox"]:checked {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+
+.field.switch input[type="checkbox"]:checked::after {
+  transform: translateX(16px);
+  background: var(--accent);
+}
+
+/* Panels group their rows into the same card the rail uses. */
+.panel-section {
+  margin-bottom: 10px;
+  padding: 12px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.row.active .row-main {
+  color: var(--accent);
+}
+
+.transcript {
+  max-height: 60vh;
+  overflow: auto;
+  padding: 10px;
+  background: var(--pane-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* On a phone the hamburger is a back arrow: the stage is a screen you
+   leave, not a drawer you open. */
+#nav.back .bars {
+  width: 0;
+  background: none;
+}
+
+#nav.back .bars::before,
+#nav.back .bars::after {
+  width: 10px;
+  top: 0;
+  left: -1px;
+  transform-origin: left center;
+}
+
+#nav.back .bars::before {
+  transform: rotate(-45deg);
+}
+
+#nav.back .bars::after {
+  transform: rotate(45deg);
+}
+
+.job-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.schedule {
+  color: var(--dim-2);
+  font-size: 10.5px;
+}
+
+/* ===== status rail ===== */
+#info {
+  display: none;
+  flex-direction: column;
+  gap: 10px;
+  width: var(--info-w);
+  padding: 14px;
+  background: var(--bg);
+  border-left: 1px solid var(--hairline);
+  overflow-y: auto;
+  flex: 0 0 auto;
+}
+
+.info-card {
+  padding: 12px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+/* ===== input region ===== */
+#input {
+  position: relative;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 10px 14px 16px;
+  background: var(--bg);
+  border-top: 1px solid var(--hairline);
+  flex: 0 0 auto;
+}
+
+#claim {
+  display: flex;
+  gap: 8px;
+}
+
+#claim-go {
+  flex: 1;
+  height: 40px;
+  border-radius: 11px;
+  font-size: 13.5px;
+}
+
+#claim-read {
+  height: 40px;
+  border-radius: 11px;
+}
+
+/* An agent asking a question, answered without typing anything. */
+#prompt {
+  padding: 12px 13px 13px;
+  background: var(--bg-raise);
+  border: 1px solid #2c3a3d;
+  border-radius: 14px;
+}
+
+.prompt-q {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prompt-row {
+  display: flex;
+  gap: 8px;
+}
+
+.prompt-btn {
+  flex: 1;
+  height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--bg-alt);
+  color: var(--fg);
+  font-size: 13.5px;
+}
+
+.prompt-btn.accent {
+  border-color: transparent;
+}
+
+.prompt-btn.danger {
+  color: var(--red);
+}
+
+#sugg {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+#sugg::-webkit-scrollbar {
+  display: none;
+}
+
+.sug {
+  height: 28px;
+  padding: 0 10px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--dim);
+  font-size: 11.5px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+#keys {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.krow {
+  display: flex;
+  gap: 6px;
+}
+
+.krow.scroll {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.krow.scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.key {
+  min-width: 39px;
+  height: 30px;
+  padding: 0 9px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--dim);
+  font-family: var(--code);
+  font-size: 11px;
+  flex: 0 0 auto;
+}
+
+.krow:not(.scroll) .key {
+  flex: 1;
+}
+
+.key:active,
+.key.on {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+#entry {
+  display: flex;
+  align-items: flex-end;
+  gap: 9px;
+}
+
+#entry-box {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 46px;
+  padding: 0 13px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  min-width: 0;
+}
+
+#entry-box:focus-within {
+  border-color: var(--accent-line);
+}
+
+#entry-mark {
+  color: var(--accent);
+  font-size: 13px;
+}
+
+#entry-text {
+  flex: 1;
+  min-width: 0;
+  max-height: 30vh;
+  padding: 12px 0;
+  border: none;
+  background: none;
+  border-radius: 0;
+  resize: none;
+  font-family: var(--code);
+  /* 16px or Safari zooms the page the moment it takes focus. */
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+#entry-text::placeholder {
+  color: var(--faint);
+}
+
+#entry-add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  color: var(--dim-2);
+  flex: 0 0 auto;
+}
+
+#entry-send {
+  width: 46px;
+  height: 46px;
+  padding: 0;
+  border-radius: 13px;
+  flex: 0 0 auto;
+}
+
+/* ===== footer ===== */
+#bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 30px;
+  padding: 0 14px;
+  background: var(--bg-head);
+  border-top: 1px solid var(--hairline);
+  color: var(--dim-2);
+  font-size: 10.5px;
+  flex: 0 0 auto;
+}
+
+#bar-where {
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#bar-web {
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 10.5px;
+}
+
+#bar-web .dot {
+  background: var(--dim-2);
+}
+
+#bar-web[data-life="live"] {
+  color: var(--accent);
+}
+
+#bar-web[data-life="live"] .dot {
+  background: var(--accent);
+}
+
+#bar-web[data-life="starting"] .dot {
+  background: var(--starting);
+  animation: ring 2s infinite;
+}
+
+#bar-web[data-life="error"] {
+  color: var(--red);
+}
+
+#bar-web[data-life="error"] .dot {
+  background: var(--red);
+}
+
+#bar-facts {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ===== dock ===== */
+#dock {
+  display: none;
+  align-items: stretch;
+  height: 64px;
+  padding: 0 6px;
+  padding-bottom: env(safe-area-inset-bottom);
+  background: var(--bg-head);
+  border-top: 1px solid var(--hairline);
+  flex: 0 0 auto;
+}
+
+#dock button {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: var(--dim-2);
+  font-size: 10.5px;
+}
+
+#dock button.on {
+  color: var(--accent);
+}
+
+#dock .ico {
+  width: 18px;
+  height: 18px;
+}
+
+/* ===== toasts ===== */
+#toasts {
+  position: fixed;
+  right: 8px;
+  left: 8px;
+  bottom: auto;
+  top: calc(env(safe-area-inset-top) + 94px);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.toast {
+  max-width: 420px;
+  padding: 9px 14px;
+  background: var(--bg-raise);
+  border: 1px solid var(--border-2);
+  border-radius: 10px;
+  color: var(--fg);
+  font-size: 12.5px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  transition: opacity 300ms var(--ease), transform 300ms var(--ease);
+}
+
+.toast.bad {
+  border-color: color-mix(in srgb, var(--red) 45%, transparent);
+  color: var(--red);
+}
+
+.toast.warn {
+  border-color: color-mix(in srgb, var(--starting) 45%, transparent);
+}
+
+.toast.out {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
+/* ===== modal, sheet, palette ===== */
+#modal,
+#sheet,
+#palette {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  background: rgba(6, 9, 11, 0.72);
+}
+
+#modal[hidden],
+#sheet[hidden],
+#palette[hidden] {
+  display: none;
+}
+
+#modal {
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+#modal-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  max-width: 520px;
+  max-height: 80vh;
+  overflow: auto;
+  padding: 16px;
+  background: var(--bg-raise);
+  border: 1px solid var(--border-2);
+  border-radius: 16px;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
+}
+
+#modal-card header {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+#modal-card input,
+#modal-card select,
+#modal-card textarea {
+  width: 100%;
+  min-height: 40px;
+  padding: 9px 11px;
+  font-size: 13px;
+}
+
+#modal-card footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+#modal-card footer button {
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  color: var(--dim);
+}
+
+#modal-card footer button.accent {
+  border-color: transparent;
+  color: var(--accent-ink);
+}
+
+#modal-card footer button.danger {
+  border-color: color-mix(in srgb, var(--red) 45%, transparent);
+  color: var(--red);
+}
+
+#sheet {
+  align-items: flex-end;
+  justify-content: center;
+}
+
+#sheet-card {
+  width: 100%;
+  max-height: 82vh;
+  overflow: auto;
+  padding: 10px 10px calc(22px + env(safe-area-inset-bottom));
+  background: #0e1316;
+  border-top: 1px solid var(--border);
+  border-radius: 22px 22px 0 0;
+  box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.65);
+}
+
+#sheet-card.anchored {
+  position: fixed;
+  width: 280px;
+  max-height: 70vh;
+  padding: 8px;
+  border: 1px solid var(--border-2);
+  border-radius: 14px;
+}
+
+.sheet-grip {
+  width: 38px;
+  height: 4px;
+  margin: 2px auto 8px;
+  border-radius: 4px;
+  background: var(--border-2);
+}
+
+#sheet-card.anchored .sheet-grip {
+  display: none;
+}
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 6px 12px 12px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.sheet-head .ico,
+.sheet-head img {
+  width: 34px;
+  height: 34px;
+  padding: 8px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-radius: 9px;
+}
+
+.sheet-head-text {
+  min-width: 0;
+}
+
+.sheet-head-text b {
+  display: block;
+  font-size: 14.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sheet-head-text span {
+  display: block;
+  color: var(--dim-2);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#sheet-card.anchored .sheet-head {
+  padding: 4px 8px 8px;
+}
+
+#sheet-card.anchored .sheet-head .ico,
+#sheet-card.anchored .sheet-head img {
+  width: 24px;
+  height: 24px;
+  padding: 5px;
+}
+
+#sheet-card.anchored .sheet-head-text b {
+  font-size: 12.5px;
+}
+
+.sheet-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 48px;
+  padding: 0 12px;
+  border-radius: 11px;
+  font-size: 14.5px;
+  text-align: left;
+}
+
+.sheet-item:hover {
+  background: var(--surface);
+}
+
+.sheet-item.accent-item {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.sheet-item-text {
+  min-width: 0;
+}
+
+.sheet-item-text .note {
+  display: block;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.sheet-item .hint {
+  color: var(--dim-2);
+  font-size: 11.5px;
+  flex: 0 0 auto;
+}
+
+.sheet-sep {
+  height: 1px;
+  margin: 6px 12px;
+  background: var(--hairline);
+}
+
+.sheet-cancel {
+  width: 100%;
+  min-height: 48px;
+  margin-top: 6px;
+  border-top: 1px solid var(--hairline);
+  color: var(--red);
+  font-size: 14.5px;
+}
+
+#sheet-card.anchored .sheet-item {
+  min-height: 36px;
+  padding: 0 8px;
+  font-size: 12.5px;
+}
+
+#sheet-card.anchored .sheet-cancel {
+  display: none;
+}
+
+#palette {
+  align-items: flex-start;
+  justify-content: center;
+  padding: 10vh 16px 16px;
+}
+
+#palette-card {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 560px;
+  max-height: 70vh;
+  background: var(--bg-raise);
+  border: 1px solid var(--border-2);
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
+}
+
+#palette-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  height: 50px;
+  border-bottom: 1px solid var(--hairline);
+  color: var(--dim-2);
+}
+
+#palette-input {
+  flex: 1;
+  height: 100%;
+  border: none;
+  background: none;
+  font-size: 15px;
+}
+
+#palette-list {
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.pal-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 10px;
+  border-radius: 10px;
+  text-align: left;
+}
+
+.pal-row.on {
+  background: var(--accent-soft);
+}
+
+.pal-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  color: var(--dim);
+  flex: 0 0 auto;
+}
+
+.pal-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.pal-text b {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pal-text span {
+  display: block;
+  color: var(--faint);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pal-kind {
+  color: var(--dim-2);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  flex: 0 0 auto;
+}
+
+/* ===== connection states ===== */
+body.booting #body,
+body.booting #bar,
+body.booting #dock {
+  opacity: 0;
+}
+
+body.booting::after {
+  content: "";
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  border: 2px solid var(--border-2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 700ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+body.dropped #body {
+  opacity: 0.45;
+  filter: grayscale(0.6);
+  pointer-events: none;
+}
+
+/* ===== desktop ===== */
+@media (min-width: 861px) {
+  #crumb {
+    display: none;
+  }
+
+  #more,
+  #dock {
+    display: none;
+  }
+
+  #panel[hidden] {
+    display: none;
+  }
+}
+
+/* The status rail only earns its width when there is width to spare. */
+@media (min-width: 1280px) {
+  #info {
+    display: flex;
+  }
+}
+
+/* ===== mobile ===== */
+@media (max-width: 860px) {
+  #rail,
+  #side-top,
+  #layout,
+  #stage-head,
+  #host,
+  #facts-top,
+  .tab-x {
+    display: none;
+  }
+
+  #top {
+    gap: 10px;
+    padding: 0 12px;
+    padding-top: env(safe-area-inset-top);
+    height: calc(56px + env(safe-area-inset-top));
+  }
+
+  #nav {
+    display: inline-flex;
+  }
+
+  #brand-text b {
+    font-size: 17px;
+  }
+
+  /* Home says who you are and where; the stage says which terminal you
+     are in. Never both. */
+  html[data-view="home"] #nav,
+  html[data-view="home"] #crumb,
+  html[data-view="home"] #more,
+  html[data-view="panel"] #brand,
+  html[data-view="stage"] #brand {
+    display: none;
+  }
+
+  html[data-view="stage"] #crumb,
+  html[data-view="panel"] #crumb {
+    display: flex;
+    flex: 1;
+  }
+
+  html[data-view="home"] #brand {
+    flex: 1;
+  }
+
+  #omni {
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    margin: 0;
+    justify-content: center;
+    flex: 0 0 auto;
+  }
+
+  #omni-text,
+  #omni kbd {
+    display: none;
+  }
+
+  #add {
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    border-radius: 10px;
+  }
+
+  #add::before {
+    content: "+";
+    font-size: 19px;
+    font-weight: 500;
+  }
+
+  #add .add-label {
+    display: none;
+  }
+
+  html[data-view="stage"] #add,
+  html[data-view="panel"] #add {
+    display: none;
+  }
+
+  #notice {
+    display: none;
+  }
+
+  #side,
+  #stage,
+  #panel {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    border: none;
+    display: none;
+  }
+
+  html[data-view="home"] #side {
+    display: flex;
+  }
+
+  /* The host belongs under the wordmark here, not in a chip beside it:
+     a phone's header has one line of room. */
+  #brand-text {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0;
+  }
+
+  html[data-view="home"] #host {
+    display: inline;
+    height: auto;
+    padding: 0;
+    background: none;
+    border: none;
+    font-size: 11px;
+  }
+
+  html[data-view="home"] #host::before {
+    display: none;
+  }
+
+  /* Each project is a card a thumb can aim at, not a run of rows. */
+  .proj {
+    margin: 0 12px 10px;
+    background: #0e1316;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+
+  .proj-head {
+    padding: 12px 10px 12px 6px;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .proj.folded .proj-head {
+    border-bottom: none;
+  }
+
+  .win {
+    border-radius: 0;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .new-term {
+    justify-content: center;
+    padding: 0 12px;
+  }
+
+  html[data-view="stage"] #stage {
+    display: flex;
+  }
+
+  html[data-view="panel"] #panel {
+    display: flex;
+  }
+
+  #wins {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .tab {
+    height: 34px;
+    border-radius: 999px;
+  }
+
+  /* The pane *is* the screen here: a card with a title bar, rounded
+     corners and a gap around it spends a tenth of a phone's height saying
+     what the header already says. */
+  #grid {
+    padding: 0;
+    gap: 0;
+    grid-template-columns: 1fr !important;
+  }
+
+  .pane {
+    border: none;
+    border-radius: 0;
+  }
+
+  .pane-head {
+    display: none;
+  }
+
+  .pane-body {
+    padding: 10px 12px;
+  }
+
+  #dock {
+    display: flex;
+  }
+
+  #bar {
+    display: none;
+  }
+
+  #panel-body {
+    padding: 12px 12px 20px;
+  }
+
+  .win {
+    min-height: 52px;
+  }
+
+  .diff {
+    font-size: 11px;
+  }
+
+  #toasts {
+    top: calc(env(safe-area-inset-top) + 70px);
+  }
+}
+
+/* A tablet held sideways used to get two panes by media query. It now
+   has the same Focus/Split/Grid control a laptop has, so the choice is
+   the reader's and there is nothing to guess here. */
+
+/* ===== keyboard up ===== */
+/* iOS lays the keyboard over the page. `--kb` is how much it takes, set
+   by `term.js` from `visualViewport`; everything that is not the pane and
+   the line being typed gets out of the way. */
+html.kb #dock,
+html.kb #bar,
+html.kb #wins,
+html.kb #claim,
+html.kb #prompt {
+  display: none;
+}
+
+html.kb #input {
+  padding-bottom: 4px;
+}
+
+/* Landscape with the keyboard up leaves a hundred pixels of terminal: the
+   second key row is the first thing to go. */
+html.kb.short .krow.scroll {
+  display: none;
+}
+
+/* ===== key row settings ===== */
+/* The settings toggles drop a whole group out of the second key row; the
+   `#` key in the first row is what shows or hides the row itself. */
+html[data-keys-sym="off"] .key.sym,
+html[data-keys-ctl="off"] .key.ctl {
+  display: none;
+}
+
+/* Laid out by an id or a class, hidden by the attribute: an id beats the
+   UA's `[hidden]` rule, so say it once, last, for everything. */
+[hidden] {
+  display: none !important;
+}
+
+/* ===== reduced motion ===== */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,12 @@
+[package]
+name = "taix-mcp"
+version.workspace = true
+edition.workspace = true
+description = "MCP stdio server exposing TaiX projects, agents and pane output."
+
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+taix-core.workspace = true
+taix-tmux.workspace = true

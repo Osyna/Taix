@@ -1,0 +1,13 @@
+[package]
+name = "taix-web"
+version.workspace = true
+edition.workspace = true
+description = "LAN web front-end: the same TaiX, served over HTTP."
+
+[dependencies]
+parking_lot.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+taix-core.workspace = true
+taix-git.workspace = true
+taix-term.workspace = true

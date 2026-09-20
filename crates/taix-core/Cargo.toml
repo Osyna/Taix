@@ -1,0 +1,13 @@
+[package]
+name = "taix-core"
+version.workspace = true
+edition.workspace = true
+description = "Project/agent state, persistence and lifecycle. No UI dependencies."
+
+[dependencies]
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+taix-git.workspace = true
+taix-tmux.workspace = true
+toml.workspace = true

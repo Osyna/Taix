@@ -1,0 +1,9 @@
+[package]
+name = "taix-tmux"
+version.workspace = true
+edition.workspace = true
+description = "tmux control-mode client. No UI dependencies."
+
+[dependencies]
+nix.workspace = true
+parking_lot.workspace = true

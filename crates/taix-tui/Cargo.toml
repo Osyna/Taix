@@ -1,0 +1,14 @@
+[package]
+name = "taix-tui"
+version.workspace = true
+edition.workspace = true
+description = "Ratatui front-end, for attaching over SSH."
+
+
+[dependencies]
+crossterm.workspace = true
+ratatui.workspace = true
+taix-core.workspace = true
+taix-git.workspace = true
+taix-term.workspace = true
+taix-tmux.workspace = true

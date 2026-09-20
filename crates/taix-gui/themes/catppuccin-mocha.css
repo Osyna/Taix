@@ -1,0 +1,31 @@
+/* Catppuccin Mocha. Only the tokens TaiX draws with; libadwaita supplies
+   the rest of the widget styling. */
+@define-color taix_bg        #1e1e2e;
+@define-color taix_bg_alt    #181825;
+@define-color taix_pane_bg   #11111b;
+@define-color taix_fg        #cdd6f4;
+@define-color taix_dim       #a6adc8;
+@define-color taix_border    #313244;
+@define-color taix_accent    #89b4fa;
+@define-color taix_working   #a6e3a1;
+@define-color taix_waiting   #f9e2af;
+@define-color taix_failed    #f38ba8;
+@define-color taix_done      #94e2d5;
+@define-color taix_idle      #6c7086;
+
+/* Window tints: the palette's own accents, so a coloured window still looks
+   like it belongs to the theme. */
+@define-color taix_tint_red    #f38ba8;
+@define-color taix_tint_orange #fab387;
+@define-color taix_tint_yellow #f9e2af;
+@define-color taix_tint_green  #a6e3a1;
+@define-color taix_tint_teal   #94e2d5;
+@define-color taix_tint_blue   #89b4fa;
+@define-color taix_tint_purple #cba6f7;
+@define-color taix_tint_pink   #f5c2e7;
+
+/* Glows: none. The palette is flat by design, so the glass sits on its own bg. */
+@define-color taix_glow_a @taix_bg;
+@define-color taix_glow_b @taix_bg;
+@define-color taix_glow_c @taix_bg;
+@define-color taix_void   @taix_bg;

@@ -1,0 +1,40 @@
+[package]
+name = "taix"
+version.workspace = true
+edition.workspace = true
+description = "CLI, TUI front and MCP server in one binary; the GTK4 front as a separate one."
+
+# Two binaries on purpose, not one.
+#
+# The dynamic linker maps a binary's whole dependency set at startup, whatever
+# subcommand you then run. A single binary containing both fronts costs
+# 39.1 MB resident to display the *terminal* UI, against 1.1 MB for the same
+# code in a binary that never linked GTK. So `taix` links no UI toolkit and
+# `taix --gui` execs `taix-gui`, which pays for GTK only when asked.
+[[bin]]
+name = "taix"
+path = "src/main.rs"
+
+[[bin]]
+name = "taix-gui"
+path = "src/bin/taix-gui.rs"
+required-features = ["gui"]
+
+[features]
+default = []
+# The window ships with the browser panel. Linking WebKitGTK costs 13.8 MB
+# PSS of mapped library at startup (measured: `dlopen` of
+# libwebkitgtk-6.0.so.4 into an idle process); the engine itself - network
+# process, web process, GPU process - is not started until the panel is
+# opened for the first time, which is where the real cost is. A build
+# without WebKitGTK installed is `-p taix-gui` on its own, whose `browser`
+# feature is off by default.
+gui = ["dep:taix-gui", "taix-gui/browser"]
+
+[dependencies]
+taix-core.workspace = true
+taix-git.workspace = true
+taix-tmux.workspace = true
+taix-tui.workspace = true
+taix-mcp.workspace = true
+taix-gui = { workspace = true, optional = true }
