@@ -1080,55 +1080,61 @@ button.git-tool.git-more { min-width: 22px; padding: 0 4px; }
   box-shadow: inset 0 0 0 2px @taix_accent;
 }
 
-/* Tab strip: horizontal, icon + name per tab, active marked, close on active.
-   Same glass and hairline language as the pane header. */
+/* Tab strip: the header of a pane that holds several windows. The active
+   tab is the card's own header continued upward - same fill, no line
+   between it and the card; the others sit behind it. Each tab carries its
+   window's state as a bullet, because a background tab that needs input
+   has to say so without being opened. */
 .tab-strip {
-  padding: 6px 8px;
-  background: @taix_glass_hi;
-  border-bottom: 1px solid @taix_hairline;
-}
-.tab-button {
-  padding: 0;
-  min-height: 0;
-  border-radius: 6px;
+  padding: 5px 6px 0;
+  background: @taix_pane_bg;
 }
 .tab {
-  padding: 5px 10px;
-  border-radius: 6px;
+  padding: 5px 8px;
+  border-radius: 7px 7px 0 0;
   background: transparent;
+  border: 1px solid transparent;
+  border-bottom: 1px solid @taix_hairline;
   transition: background 110ms cubic-bezier(0.2, 0, 0.2, 1);
 }
-.tab label {
-  font-size: 11px;
-  color: mix(@taix_dim, @taix_fg, 0.45);
-}
-.tab image {
+.tab:hover { background: alpha(@taix_fg, 0.04); }
+.tab-name {
+  font-size: 10.5px;
   color: mix(@taix_dim, @taix_fg, 0.35);
-  -gtk-icon-size: 13px;
-}
-.tab-button:hover .tab {
-  background: alpha(@taix_fg, 0.05);
 }
 .tab.active {
-  background: alpha(@taix_fg, 0.08);
+  background: @taix_glass_hi;
+  border-color: @taix_hairline;
+  border-bottom-color: transparent;
 }
-.tab.active label {
-  color: mix(@taix_fg, white, 0.3);
+.tab.active .tab-name {
+  color: mix(@taix_fg, white, 0.25);
   font-weight: 500;
 }
-.tab.active image {
-  color: mix(@taix_fg, white, 0.3);
-}
+/* The state bullet, in the same colours the card's dot and badge use. */
+.tab-dot { font-size: 7px; color: mix(@taix_bg, @taix_fg, 0.45); }
+.tab-dot.starting, .tab-dot.working { color: @taix_working; }
+.tab-dot.waiting { color: @taix_waiting; }
+.tab-dot.done    { color: @taix_done; }
+.tab-dot.failed  { color: @taix_failed; }
+/* Tint follows the same token set as the card header. */
+.tab.active.tint-red    { background: alpha(@taix_tint_red, 0.18); }
+.tab.active.tint-orange { background: alpha(@taix_tint_orange, 0.18); }
+.tab.active.tint-yellow { background: alpha(@taix_tint_yellow, 0.18); }
+.tab.active.tint-green  { background: alpha(@taix_tint_green, 0.18); }
+.tab.active.tint-teal   { background: alpha(@taix_tint_teal, 0.18); }
+.tab.active.tint-blue   { background: alpha(@taix_tint_blue, 0.18); }
+.tab.active.tint-purple { background: alpha(@taix_tint_purple, 0.18); }
+.tab.active.tint-pink   { background: alpha(@taix_tint_pink, 0.18); }
 .tab-close {
-  padding: 0 2px;
-  min-height: 18px;
-  min-width: 18px;
+  padding: 0;
+  margin-left: 2px;
+  min-height: 16px;
+  min-width: 16px;
   color: @taix_dim;
-  -gtk-icon-size: 12px;
+  -gtk-icon-size: 11px;
 }
-.tab-close:hover {
-  color: @taix_failed;
-}
+.tab-close:hover { color: @taix_failed; background: alpha(@taix_failed, 0.14); }
 
 /* Dividers: a 1px hairline that still catches the pointer for a drag. The
    focused pane is marked by its header tint, not a border, so the divider is

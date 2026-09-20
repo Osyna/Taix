@@ -550,68 +550,143 @@ pub fn agent_card(agent: &Agent, cfg: &taix_core::Config) -> AgentCard {
     card
 }
 
+/// The CSS class on a tab group's container, which is also how the pane
+/// tree recognises one when it takes the old layout apart.
+pub const TAB_GROUP: &str = "tab-group";
+
+/// What one tab shows: the window's name, its state and its tint.
+pub struct TabItem {
+    pub id: AgentId,
+    pub name: String,
+    pub state: String,
+    pub tint: Option<String>,
+}
+
 /// One group's tabs: the windows sharing a pane, the active one marked.
 ///
+/// A tab is a box with a click gesture rather than a `GtkButton`, so the
+/// close affordance can sit inside it instead of floating after it.
 /// Clipped like the card header for the same reason: a long tab list must
 /// not become the pane's minimum width and push every divider around.
+///
+/// Three ways out of a group, because a drag is not always convenient:
+/// drag the tab onto a pane, double-click it to take half of this one, or
+/// close it.
 pub fn tab_strip(
-    items: &[(AgentId, String, Option<String>)],
+    items: &[TabItem],
     active: usize,
     pick: impl Fn(AgentId) + 'static,
+    out: impl Fn(AgentId) + 'static,
     close: impl Fn(AgentId) + 'static,
 ) -> gtk::Widget {
-    let strip = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let strip = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     strip.add_css_class("tab-strip");
     let pick = Rc::new(pick);
+    let out = Rc::new(out);
     let close = Rc::new(close);
-    for (i, (id, name, icon)) in items.iter().enumerate() {
-        let tab = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        tab.add_css_class("tab");
+    for (i, item) in items.iter().enumerate() {
+        let tab = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+        let mut classes: Vec<String> = vec!["tab".into(), item.state.clone()];
         if i == active {
-            tab.add_css_class("active");
+            classes.push("active".into());
         }
-        let mark = crate::icons::image(icon.as_deref(), 13);
-        mark.set_valign(gtk::Align::Center);
-        tab.append(&mark);
+        if let Some(tint) = &item.tint {
+            classes.push(format!("tint-{tint}"));
+        }
+        tab.set_css_classes(&classes.iter().map(String::as_str).collect::<Vec<_>>());
+
+        // A bullet, not the harness icon: GTK will not recolour a bundled
+        // SVG from CSS, and the one thing a background tab must convey is
+        // its state. The harness mark is already in the sidebar.
+        let dot = gtk::Label::builder()
+            .label("\u{25cf}")
+            .valign(gtk::Align::Center)
+            .css_classes(["tab-dot", &item.state])
+            .build();
+        tab.append(&dot);
         tab.append(
             &gtk::Label::builder()
-                .label(name)
+                .label(&item.name)
                 .ellipsize(gtk::pango::EllipsizeMode::End)
-                .max_width_chars(24)
+                .max_width_chars(20)
                 .valign(gtk::Align::Center)
+                .css_classes(["tab-name", "mono"])
                 .build(),
         );
-        let button = gtk::Button::builder()
-            .child(&tab)
-            .css_classes(["flat", "tab-button"])
-            .build();
-        button.connect_clicked({
-            let (pick, id) = (pick.clone(), *id);
-            move |_| pick(id)
-        });
-        strip.append(&button);
-        // Only the tab being looked at offers its close button: one per tab
-        // is a row of crosses, and closing what you cannot see is a mistake
-        // waiting to happen.
+        if i == active && items.len() > 1 {
+            // The way out of a group that does not need a drag: one click
+            // and the window takes half the pane back.
+            let leave = gtk::Button::builder()
+                .icon_name("view-dual-symbolic")
+                .valign(gtk::Align::Center)
+                .tooltip_text("Split this window out of the group")
+                .css_classes(["flat", "tab-close"])
+                .build();
+            leave.connect_clicked({
+                let (out, id) = (out.clone(), item.id);
+                move |_| out(id)
+            });
+            tab.append(&leave);
+        }
         if i == active {
             let shut = gtk::Button::builder()
                 .icon_name("window-close-symbolic")
-                .css_classes(["flat", "tab-close"])
                 .valign(gtk::Align::Center)
+                .tooltip_text("Close this window")
+                .css_classes(["flat", "tab-close"])
                 .build();
             shut.connect_clicked({
-                let (close, id) = (close.clone(), *id);
+                let (close, id) = (close.clone(), item.id);
                 move |_| close(id)
             });
-            strip.append(&shut);
+            tab.append(&shut);
         }
+
+        // On release, not on press: pressing a tab rebuilds the strip to
+        // show the new active tab, which destroys the widget the pointer
+        // is holding - and the drag that was about to start with it.
+        let click = gtk::GestureClick::new();
+        click.connect_released({
+            let (pick, out, id) = (pick.clone(), out.clone(), item.id);
+            move |_, presses, _, _| {
+                if presses >= 2 {
+                    out(id);
+                } else {
+                    pick(id);
+                }
+            }
+        });
+        tab.add_controller(click);
+        // Middle-click closes, as it does in every tab strip ever made.
+        let middle = gtk::GestureClick::new();
+        middle.set_button(gtk::gdk::BUTTON_MIDDLE);
+        middle.connect_pressed({
+            let (close, id) = (close.clone(), item.id);
+            move |_, _, _, _| close(id)
+        });
+        tab.add_controller(middle);
+        // Dragging a tab is dragging its window: the same payload the card
+        // header carries, so a tab can be dropped back into a split.
+        let drag = gtk::DragSource::builder()
+            .actions(gtk::gdk::DragAction::MOVE)
+            .content(&gtk::gdk::ContentProvider::for_value(&item.id.to_value()))
+            .build();
+        drag.connect_drag_begin({
+            let tab = tab.clone();
+            move |source, _| {
+                source.set_icon(Some(&gtk::WidgetPaintable::new(Some(&tab))), 0, 0);
+            }
+        });
+        tab.add_controller(drag);
+        tab.set_cursor_from_name(Some("pointer"));
+        strip.append(&tab);
     }
-    // Clipped like the card header: propagate no width, scroll horizontally.
     let clip = gtk::ScrolledWindow::builder()
         .child(&strip)
         .hscrollbar_policy(gtk::PolicyType::External)
         .vscrollbar_policy(gtk::PolicyType::Never)
         .propagate_natural_width(false)
+        .css_classes(["tab-clip"])
         .build();
     clip.upcast()
 }
@@ -1209,6 +1284,17 @@ pub fn refresh_harness_menu(w: &Widgets, cfg: &Config) {
 /// two panes to three failed GTK's "child already has a parent" assertion
 /// and every surviving pane vanished, leaving only one card on screen.
 fn detach_tree(widget: &gtk::Widget) {
+    // A tab group is a box holding its strip and the active card, so the
+    // card inside one is a grandchild and keeps its parent unless the box
+    // is emptied as well. It is marked, because a card's own root is a box
+    // too and taking that apart would dismantle the card.
+    if widget.has_css_class(TAB_GROUP) {
+        while let Some(child) = widget.first_child() {
+            child.unparent();
+            detach_tree(&child);
+        }
+        return;
+    }
     let Some(paned) = widget.downcast_ref::<gtk::Paned>() else {
         return;
     };

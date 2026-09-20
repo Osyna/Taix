@@ -873,13 +873,18 @@ impl App {
         let (hint, pending) = (card.clone(), self.pending.clone());
         dock.connect_drop(move |_, value, x, y| {
             hint.show_drop(None);
-            match value.get::<AgentId>() {
-                Ok(from) if from != id => {
-                    pending.push(Pointer::Dock(from, id, side_at(x, y)));
-                    true
-                }
-                _ => false,
+            let Ok(from) = value.get::<AgentId>() else {
+                return false;
+            };
+            let side = side_at(x, y);
+            // A window dropped on its own card means something only when it
+            // is one tab of a group: it leaves the group and takes half the
+            // pane. On a plain pane it is a no-op.
+            if from == id && matches!(side, Side::Centre | Side::Tab) {
+                return false;
             }
+            pending.push(Pointer::Dock(from, id, side));
+            true
         });
         card.root.add_controller(dock);
 
@@ -1896,7 +1901,8 @@ impl App {
             }
         }
         let shape = shown.as_ref().map(Node::encode);
-        if shape != self.laid_out.as_ref().map(|(s, _)| s.clone()) {
+        let rebuilt = shape != self.laid_out.as_ref().map(|(s, _)| s.clone());
+        if rebuilt {
             let widget = ui::set_pane_tree(&self.w, || {
                 shown.as_ref().map(|t| {
                     t.render(&|id| self.card_widget(id), &|ids, active| {
@@ -1919,9 +1925,16 @@ impl App {
         // emulator attached to the row stranded a second `Live` that nothing
         // could ever reclaim. Switching projects then left two emulators
         // running, which is exactly what this architecture exists to avoid.
-        self.demote_focus();
-        if let Some(id) = refocus {
-            self.set_focus(id);
+        //
+        // Only when something moved, though. A rebuild that changes neither
+        // the shape nor the focused window used to drop the live emulator
+        // and re-seed it from a capture, which is a visible blink in a pane
+        // that is printing - and `reload` runs on every state change.
+        if rebuilt || self.focus != refocus {
+            self.demote_focus();
+            if let Some(id) = refocus {
+                self.set_focus(id);
+            }
         }
         ui::set_empty(&self.w, ids.is_empty(), self.projects.is_empty());
     }
@@ -1953,6 +1966,8 @@ impl App {
                 tree
             }
             Side::Tab => tree.tab(from, onto),
+            // Its own pane's edge: leave the tab group it is in.
+            side if from == onto => tree.split_out(from, side),
             side => tree.dock(from, onto, side),
         };
         self.trees.insert(project, tree);
@@ -2760,6 +2775,12 @@ impl App {
     /// the stamp is taken again by `reload`, which reads whatever changed.
     fn store_changed_externally(&self) -> bool {
         self.store.stamp() != self.store_stamp
+    }
+
+    /// Take the stamp after writing the store ourselves, so the change we
+    /// just made does not read as somebody else's on the next pass.
+    pub(super) fn restamp(&mut self) {
+        self.store_stamp = self.store.stamp();
     }
 
     // ---------- scrollback ----------

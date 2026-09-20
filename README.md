@@ -139,8 +139,13 @@ takes the whole keyboard; TaiX keeps only `Ctrl+Shift`.
 
 Drop one pane's header on another pane's **body edge** to split there, on its
 **middle** to swap the two, and on its **header** to put both in one tab
-group. Tabs are a desktop arrangement: underneath they are still separate
-tmux windows, still visible to the TUI and the phone.
+group. A tab carries its window's state, so a background tab that needs
+input says so without being opened. To leave a group: drag the tab onto
+another pane, double-click it, or press the split button beside its close
+button - the window takes half the pane back. Middle-click closes a tab.
+
+Tabs are a desktop arrangement: underneath they are still separate tmux
+windows, still visible to the TUI and the phone.
 
 ## The browser, and letting an agent drive it
 
@@ -154,6 +159,10 @@ server, so you watch it work on the page instead of reading about it:
 ```bash
 claude mcp add taix taix mcp     # or: codex mcp add taix taix mcp
 ```
+
+Settings has an **MCP** section with those lines, the config-file JSON and
+the endpoint the browser tools use, each with a copy button, so nothing
+here has to be typed from memory.
 
 Ten tools, named after Playwright MCP's because that is what models already
 know: `browser_tabs`, `browser_navigate`, `browser_snapshot`,

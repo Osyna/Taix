@@ -35,19 +35,19 @@ const THEMES: [(&str, &str); 4] = [
 /// The bar segment ids `ui::set_bar` fills.
 const SEGMENTS: [&str; 6] = ["where", "branch", "windows", "memory", "uptime", "empty"];
 
-/// The sidebar, in order. The first four are groups of the General page and
+/// The sidebar, in order. The first six are groups of the General page and
 /// scroll to it; `agents` is the other page.
-const NAV: [(&str, &str, bool); 6] = [
+const NAV: [(&str, &str, bool); 7] = [
     ("appearance", "Appearance", false),
     ("windows", "Windows", false),
     ("tmux", "tmux", false),
     ("panels", "Panels", false),
     ("web", "Web", false),
+    ("mcp", "MCP", false),
     ("agents", "Agents", true),
 ];
 
-const GENERAL_SUB: &str =
-    "Appearance, window behaviour, the tmux backend, the side panels and the web front end";
+const GENERAL_SUB: &str = "Appearance, window behaviour, the tmux backend, the side panels, the web front end and MCP integration";
 
 /// Shared draft plus the two things every control needs: a way to save and a
 /// way to complain.
@@ -361,6 +361,9 @@ fn general_page(
     let web = web_group(ed, &cfg, bridge);
     page.append(&web);
 
+    let mcp = mcp_group(ed, bridge);
+    page.append(&mcp);
+
     let scroller = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vexpand(true)
@@ -372,6 +375,7 @@ fn general_page(
         ("tmux", tmux),
         ("panels", panels),
         ("web", web),
+        ("mcp", mcp),
     ]);
     (scroller, page, groups)
 }
@@ -651,6 +655,115 @@ fn web_group(ed: &Rc<Editor>, cfg: &Config, bridge: &crate::web::Bridge) -> gtk:
             glib::ControlFlow::Continue
         }
     });
+    group
+}
+
+/// What a coding agent needs to reach this window: the stdio command to
+/// register, and the address its browser tools talk to. Both are here
+/// because the alternative is reading the README with the app open.
+fn mcp_group(ed: &Rc<Editor>, bridge: &crate::web::Bridge) -> gtk::Box {
+    use taix_web::proto::Life;
+
+    let group = group("MCP", None, None);
+
+    // A user who has not installed TaiX needs the full path, and the
+    // registration line they paste has to work from anywhere.
+    let exe = match taix_core::which("taix") {
+        Some(_) => "taix".to_string(),
+        None => std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "taix".into()),
+    };
+    let cmd = format!("{exe} mcp");
+
+    let copy_button = |ed: &Rc<Editor>, text: Rc<dyn Fn() -> Option<String>>| {
+        let button = gtk::Button::builder()
+            .icon_name("edit-copy-symbolic")
+            .valign(gtk::Align::Center)
+            .tooltip_text("Copy")
+            .css_classes(["flat"])
+            .build();
+        button.connect_clicked({
+            let toasts = ed.toasts.clone();
+            move |b| {
+                let Some(text) = text() else { return };
+                if let Some(window) = b.root().and_downcast::<adw::ApplicationWindow>() {
+                    window.clipboard().set_text(&text);
+                    toasts.add_toast(adw::Toast::new("copied"));
+                }
+            }
+        });
+        button
+    };
+
+    let fixed = |title: &str, text: String| {
+        let value = gtk::Label::builder()
+            .label(&text)
+            .xalign(0.0)
+            .wrap(true)
+            .selectable(true)
+            .css_classes(["set-row-sub", "mono"])
+            .build();
+        let copy = copy_button(ed, Rc::new(move || Some(text.clone())));
+        kit::row_live(title, Some(&value), &copy)
+    };
+
+    group.append(&fixed("Register with an agent", cmd.clone()));
+    group.append(&fixed("Claude Code", format!("claude mcp add taix {cmd}")));
+    group.append(&fixed("Codex", format!("codex mcp add taix {cmd}")));
+    group.append(&fixed(
+        "Config file",
+        format!(r#"{{"mcpServers":{{"taix":{{"command":"{exe}","args":["mcp"]}}}}}}"#),
+    ));
+
+    // The browser tools reach this window over the same listener the phone
+    // uses, so they say what it says - including that it is off.
+    let endpoint = gtk::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .selectable(true)
+        .css_classes(["set-row-sub", "mono"])
+        .build();
+    let copy = copy_button(ed, {
+        let health = bridge.health.clone();
+        Rc::new(move || {
+            let h = health();
+            (h.life == Life::Live).then(|| format!("http://{}/api/browser", h.addr))
+        })
+    });
+    group.append(&kit::row_live(
+        "Browser tools endpoint",
+        Some(&endpoint),
+        &copy,
+    ));
+    group.append(&kit::row(
+        "Needs the desktop",
+        "The browser tools drive this window's pages, so they answer only while it is open.",
+        &gtk::Box::new(gtk::Orientation::Horizontal, 0),
+    ));
+
+    let paint = {
+        let (endpoint, health) = (endpoint.clone(), bridge.health.clone());
+        move || {
+            let h = health();
+            endpoint.set_text(&match h.life {
+                Life::Live => format!("http://{}/api/browser", h.addr),
+                _ => "off - turn the web server on above".to_string(),
+            });
+        }
+    };
+    paint();
+    glib::timeout_add_seconds_local(1, {
+        let endpoint = endpoint.clone();
+        move || {
+            if endpoint.root().is_none() {
+                return glib::ControlFlow::Break;
+            }
+            paint();
+            glib::ControlFlow::Continue
+        }
+    });
+
     group
 }
 

@@ -306,6 +306,13 @@ impl App {
             for (id, state) in updates {
                 let _ = self.store.set_state(id, state);
             }
+            // Our own write, so take the stamp with it. Without this the
+            // next reconcile pass reads the file as "somebody else changed
+            // it" and does a full reload - which demotes the focused pane
+            // and re-seeds it from a capture. A busy window changes state
+            // every few hundred milliseconds, so the pane visibly blinked
+            // for as long as it was working.
+            self.restamp();
             // A state change repaints the sidebar dots and the bar counts.
             self.refresh_sidebar();
             self.refresh_bar();

@@ -33,22 +33,32 @@ impl App {
     /// marked. Clicking a tab focuses that window, which is also what makes
     /// it the active one - the two must not be able to disagree.
     pub(super) fn tab_strip(&self, ids: &[AgentId], active: usize) -> gtk::Widget {
-        let items: Vec<(AgentId, String, Option<String>)> = ids
+        let items: Vec<ui::TabItem> = ids
             .iter()
             .filter_map(|id| self.row(*id))
             .map(|row| {
-                (
-                    row.agent.id,
-                    row.agent.name.clone(),
-                    taix_core::by_id(&self.cfg, &row.agent.kind).icon,
-                )
+                let tint = row
+                    .agent
+                    .color
+                    .clone()
+                    .or_else(|| taix_core::by_id(&self.cfg, &row.agent.kind).color);
+                ui::TabItem {
+                    id: row.agent.id,
+                    name: row.agent.name.clone(),
+                    state: row.agent.state.as_str().to_string(),
+                    tint,
+                }
             })
             .collect();
         let pending = self.pending.clone();
         let pick = move |id| pending.push(Pointer::Focus(id));
+        // Double-click takes a tab out of the group and gives it half the
+        // pane: the same move as dropping it on this pane's right edge.
+        let pending = self.pending.clone();
+        let out = move |id| pending.push(Pointer::Dock(id, id, crate::tree::Side::Right));
         let pending = self.pending.clone();
         let close = move |id| pending.push(Pointer::Close(id));
-        ui::tab_strip(&items, active, pick, close)
+        ui::tab_strip(&items, active, pick, out, close)
     }
 }
 
@@ -208,6 +218,9 @@ impl App {
         {
             row.agent.url = Some(url);
         }
+        // Our own write: see `restamp`. A page that navigates every few
+        // seconds would otherwise reload the whole model that often.
+        self.restamp();
         self.sidebar_dirty = true;
     }
 

@@ -300,6 +300,45 @@ impl Node {
         }
     }
 
+    /// Take `id` out of its tab group and put it beside the group. This is
+    /// what dropping a tab on its own pane's edge means: a group of two is
+    /// the only pane there is, so there is nothing else to drop onto.
+    pub fn split_out(self, id: AgentId, side: Side) -> Node {
+        let vertical = matches!(side, Side::Top | Side::Bottom);
+        let before = matches!(side, Side::Left | Side::Top);
+        match self {
+            Node::Tabs { ids, active } if ids.contains(&id) && ids.len() > 1 => {
+                let kept: Vec<AgentId> = ids.into_iter().filter(|x| *x != id).collect();
+                let rest = match kept.len() {
+                    1 => Node::Leaf(kept[0]),
+                    _ => Node::Tabs {
+                        active: active.min(kept.len() - 1),
+                        ids: kept,
+                    },
+                };
+                let pair = if before {
+                    vec![Node::Leaf(id), rest]
+                } else {
+                    vec![rest, Node::Leaf(id)]
+                };
+                split(vertical, pair)
+            }
+            Node::Split {
+                vertical: v,
+                children,
+                positions,
+            } => Node::Split {
+                vertical: v,
+                children: children
+                    .into_iter()
+                    .map(|c| c.split_out(id, side))
+                    .collect(),
+                positions,
+            },
+            node => node,
+        }
+    }
+
     /// Put `from` beside `onto` on `side`. A split already running that way
     /// takes it as a sibling, so three drops to the right make three columns
     /// rather than a staircase of nested splits.
@@ -323,7 +362,15 @@ impl Node {
                 split(vertical, pair)
             }
             Node::Leaf(x) => Node::Leaf(x),
-            Node::Tabs { .. } => self,
+            Node::Tabs { ids, active } if ids.contains(&onto) => {
+                let pair = if before {
+                    vec![Node::Leaf(from), Node::Tabs { ids, active }]
+                } else {
+                    vec![Node::Tabs { ids, active }, Node::Leaf(from)]
+                };
+                split(vertical, pair)
+            }
+            Node::Tabs { ids, active } => Node::Tabs { ids, active },
             Node::Split {
                 vertical: v,
                 mut children,
@@ -423,6 +470,9 @@ impl Node {
             }
             Node::Tabs { ids, active } => {
                 let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                container.add_css_class(crate::ui::TAB_GROUP);
+                container.set_hexpand(true);
+                container.set_vexpand(true);
                 container.append(&strip(ids, *active));
                 if let Some(w) = card(ids[*active]) {
                     container.append(&w);
@@ -637,5 +687,23 @@ mod tests {
         // In a corner the nearer edge wins.
         assert_eq!(Side::at(10.0, 50.0, 100.0, 100.0, head), Side::Left);
         assert_eq!(Side::at(50.0, 35.0, 100.0, 100.0, head), Side::Top);
+    }
+
+    #[test]
+    fn dragging_tab_out_splits_and_folds_group() {
+        // A two-tab group: dragging one tab onto another pane's edge leaves a
+        // plain leaf behind and lands the dragged window beside the target.
+        let tree = Node::decode("h[t[1,2:0],3]").unwrap();
+        // Drag tab 2 to the right of window 3.
+        let after = tree.dock(2, 3, Side::Right);
+        assert_eq!(after.encode(), "h[1,3,2]");
+        // Drag tab 1 to the left of window 3 (2 was the only one left, so it folded).
+        let tree = Node::decode("h[t[1,2:0],3]").unwrap();
+        let after = tree.dock(1, 3, Side::Left);
+        assert_eq!(after.encode(), "h[2,1,3]");
+        // Dragging onto another tab group splits at the group level.
+        let tree = Node::decode("h[t[1,2:0],t[3,4:1]]").unwrap();
+        let after = tree.dock(1, 4, Side::Bottom);
+        assert_eq!(after.encode(), "h[2,v[t[3,4:1],1]]");
     }
 }
