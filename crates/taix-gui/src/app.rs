@@ -218,6 +218,29 @@ struct Row {
     last_markup: String,
 }
 
+impl Row {
+    /// Paint the pane, skipping the layout when the text has not moved.
+    ///
+    /// The cache belongs to the label, so every write goes through here:
+    /// clearing the label behind its back left the two disagreeing, and a
+    /// pane that came back to an unchanged screen stayed blank.
+    fn paint(&mut self, markup: &str) {
+        if markup == self.last_markup {
+            return;
+        }
+        self.card.body.set_markup(markup);
+        self.last_markup.clear();
+        self.last_markup.push_str(markup);
+    }
+
+    /// Drop the rendered text, keeping the row. The next frame repaints it.
+    fn blank(&mut self) {
+        self.card.body.set_text("");
+        self.last_markup.clear();
+        self.dirty = true;
+    }
+}
+
 pub struct App {
     pub cfg: Config,
     pub store: Store,
@@ -1846,8 +1869,7 @@ impl App {
             .iter_mut()
             .filter(|r| Some(r.agent.project) == self.selected)
         {
-            row.card.body.set_text("");
-            row.dirty = true;
+            row.blank();
         }
         self.open_startup_windows(project);
         self.selected = Some(project);

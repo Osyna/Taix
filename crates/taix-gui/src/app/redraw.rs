@@ -158,12 +158,7 @@ impl App {
                         pango::push(&mut markup, chunk, None)
                     });
                 }
-                // O1: Skip set_markup if unchanged.
-                if markup != row.last_markup {
-                    row.card.body.set_markup(&markup);
-                    row.last_markup.clear();
-                    row.last_markup.push_str(&markup);
-                }
+                row.paint(&markup);
                 continue;
             };
             markup.clear();
@@ -179,12 +174,7 @@ impl App {
                 taix_term::snapshot(size, &captured, &mut |chunk| {
                     pango::push(&mut markup, chunk, None)
                 });
-                // O1: Skip set_markup if unchanged.
-                if markup != row.last_markup {
-                    row.card.body.set_markup(&markup);
-                    row.last_markup.clear();
-                    row.last_markup.push_str(&markup);
-                }
+                row.paint(&markup);
                 continue;
             }
             match &row.live {
@@ -240,12 +230,7 @@ impl App {
                     });
                 }
             }
-            // O1: Skip set_markup if unchanged.
-            if markup != row.last_markup {
-                row.card.body.set_markup(&markup);
-                row.last_markup.clear();
-                row.last_markup.push_str(&markup);
-            }
+            row.paint(&markup);
             // Only the live pane's own paints throttle its wake-ups: an
             // unfocused snapshot landing just before a keystroke's echo must
             // not push that echo to the next timer tick.
