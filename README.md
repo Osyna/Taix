@@ -28,7 +28,7 @@ any glibc or musl distribution:
 
 ```bash
 curl -fsSL https://github.com/Osyna/Taix/releases/latest/download/taix-x86_64-linux-musl.tar.gz | tar xz
-install -Dm755 taix ~/.local/bin/taix
+install -Dm755 taix-*/taix ~/.local/bin/taix
 ```
 
 Or build it:
