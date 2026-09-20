@@ -633,7 +633,7 @@ mod tests {
     fn percent_escapes_and_plus_become_bytes() {
         assert_eq!(decode("/api/files"), "/api/files");
         assert_eq!(decode("a%20b+c"), "a b c");
-        assert_eq!(decode("%2Fhome%2Firvin"), "/home/irvin");
+        assert_eq!(decode("%2Fhome%2Fuser%2Fsrc"), "/home/user/src");
         // A stray `%` is data, not an error.
         assert_eq!(decode("100%"), "100%");
         assert_eq!(decode("%zz"), "%zz");

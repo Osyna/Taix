@@ -1,46 +1,89 @@
-# TaiX
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/banner-light.svg">
+    <img alt="TaiX" src="assets/banner-light.svg" width="640">
+  </picture>
+</p>
 
-TaiX orchestrates AI coding agents on a single tmux server. Each project can run multiple agent harnesses in separate windows, with their output captured as terminal emulator state. Three front ends share the same tmux session: a GTK desktop window, a terminal UI, and a phone/LAN web interface.
+<p align="center">
+  <a href="https://github.com/Osyna/Taix/actions"><img alt="CI" src="https://github.com/Osyna/Taix/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
+  <img alt="Linux" src="https://img.shields.io/badge/platform-Linux-informational">
+</p>
 
-## Install and run
+TaiX runs your AI coding agents as tmux windows and gives you three ways to
+watch them: a GTK desktop window, a terminal UI, and a web page you open on
+your phone. All three drive the same tmux server, so a pane you start on the
+desktop is the pane you scroll on the sofa.
 
-Build the terminal and TUI front ends:
+![The TaiX desktop: two projects in the sidebar, two live panes, the git panel open](assets/screenshot-desktop.png)
+
+<sub>`demo.tape` in the repo root records the terminal UI as a GIF: `cargo build --release && vhs demo.tape`.</sub>
+
+## Quick start
+
+TaiX is not packaged anywhere yet. Build it:
 
 ```bash
-cargo build --release
+git clone https://github.com/Osyna/Taix.git
+cd Taix
+cargo build --release          # target/release/taix - the CLI and the TUI
 ```
 
-This produces `target/release/taix`, the CLI and TUI.
-
-Build the GTK desktop window:
+You need `tmux` on `PATH`. Then:
 
 ```bash
-cargo build --release -p taix --features gui
+./target/release/taix add ~/code/my-project
+./target/release/taix
 ```
 
-This produces `target/release/taix-gui`, the desktop window.
+You get the terminal UI with your project in the sidebar. Press `n` to open an
+agent window, `t` for a plain shell, `Enter` to type into the focused pane and
+`Ctrl-]` to stop typing. `?` lists the keys, `q` quits.
 
-Run the TUI (default):
+`taix harnesses` shows which agent CLIs it found. TaiX knows 30 of them
+(Claude Code, Codex, Gemini CLI, Aider, Goose, Crush, OpenCode and so on) and
+offers the ones that are actually on your `PATH`. Anything it does not know
+you add yourself in the config.
+
+<details>
+<summary>The desktop window</summary>
+
+The GTK front end is a separate binary and needs GTK 4, libadwaita and
+WebKitGTK 6 at build time:
 
 ```bash
-taix
-```
-
-Run the desktop:
-
-```bash
+cargo build --release -p taix --features gui   # target/release/taix-gui
 taix --gui
 ```
 
-Config lives at `$XDG_CONFIG_HOME/taix/config.toml` (or `~/.config/taix/config.toml`). State and the database live at `$XDG_DATA_HOME/taix/` (or `~/.local/share/taix/`).
+A plain `cargo build` deliberately skips it, so the rest of the workspace
+compiles on a machine with no GTK installed at all.
+
+</details>
+
+Config lives at `$XDG_CONFIG_HOME/taix/config.toml` (or
+`~/.config/taix/config.toml`). State lives at `$XDG_DATA_HOME/taix/` (or
+`~/.local/share/taix/`).
+
+## How it works
+
+One tmux server holds every project's windows. A single `tmux -CC` control
+connection carries all of it: command replies and every pane's output arrive
+demultiplexed down one pty, so ten panes cost one connection rather than ten
+emulators. The pane you are looking at is a live terminal emulator; the rest
+are refreshed from batched `capture-pane` reads.
+
+That is also why the front ends can disagree about what they are showing
+without disagreeing about state: the desktop, the TUI and a phone can each
+look at a different project, and closing all of them leaves the agents running
+in tmux.
 
 ## The desktop
 
-The desktop window shows projects in a sidebar and their agent windows as panes. The focused pane is a live terminal emulator; unfocused panes are refreshed from tmux captures. Right-click a project or window for its menu. Click a pane to focus it and type into it.
-
-### Keyboard shortcuts
-
-All shortcuts use `Ctrl+Shift`; the focused pane receives the rest of the keyboard.
+Projects sit in a sidebar, their agent windows tile as panes. The focused pane
+takes the whole keyboard; TaiX keeps only `Ctrl+Shift`.
 
 | Key | Action |
 |-----|--------|
@@ -56,143 +99,115 @@ All shortcuts use `Ctrl+Shift`; the focused pane receives the rest of the keyboa
 | `Ctrl+Shift+E` | Fold/unfold selected project |
 | `Ctrl+Shift+Z` | Zoom focused pane |
 | `Ctrl+Shift+M` | Mute/unmute selected project |
-| `Ctrl+Shift+S` | Save session |
-| `Ctrl+Shift+O` | Open saved session |
+| `Ctrl+Shift+S` / `O` | Save / open a session |
 | `Ctrl+Shift+J` | Automation (scheduled jobs) |
-| `Ctrl+Shift+V` | Paste (images become file paths) |
-| `Ctrl+Shift+C` | Copy selection |
-| `Ctrl+Shift++` | Increase pane font size |
-| `Ctrl+Shift+-` | Decrease pane font size |
-| `Ctrl+Shift+0` | Reset pane font size |
-| `Ctrl+Shift+1` to `9` | Focus nth window of current project |
-| `Ctrl+Shift+Left` | Previous project |
-| `Ctrl+Shift+Right` | Next project |
-| `Ctrl+Shift+Up` | Scroll pane history up one line |
-| `Ctrl+Shift+Down` | Scroll pane history down one line |
-| `Ctrl+Tab` | Cycle focus to next window |
-| `Shift+Page Up` | Scroll pane history up one page |
-| `Shift+Page Down` | Scroll pane history down one page |
+| `Ctrl+Shift+V` / `C` | Paste (images become file paths) / copy |
+| `Ctrl+Shift++` / `-` / `0` | Pane font size |
+| `Ctrl+Shift+1`…`9` | Focus the nth window of this project |
+| `Ctrl+Shift+←` / `→` | Previous / next project |
+| `Ctrl+Shift+↑` / `↓` | Scroll pane history one line |
+| `Ctrl+Tab` | Cycle focus |
+| `Shift+PgUp` / `PgDn` | Scroll pane history one page |
 
-## The web front end
+## The phone
 
-Enable the web server in Settings or set `web.enabled = true` in `config.toml`. The server starts on port 4040 by default. A chip appears in the status bar showing the LAN address.
+Turn the web server on in Settings or set `web.enabled = true`. It listens on
+port 4040 and the status bar shows the LAN address to type.
 
-### Pairing
+The page is not open to the network. A device with no pairing cookie gets a
+pairing page and nothing else; the desktop raises an amber chip, you tap Pair
+or Deny, and the approved device gets a cookie bound to its IP. The key lives
+at `$XDG_DATA_HOME/taix/web.key` (mode 0600) and survives restarts — rotate it
+from the pairing popover to drop every paired device at once.
 
-When a device without a pairing cookie requests a page, the desktop shows an amber pairing chip beside the web chip. Click the chip to see pending requests. Tap Pair to allow a device or Deny to refuse it. Approved devices receive a cookie valid for their IP address.
+Set `web.tailscale = true` to bind the tailnet address instead of every
+interface. To put HTTPS in front of it, start TaiX first and then
+`tailscale serve` the local port.
 
-The pairing key is stored at `$XDG_DATA_HOME/taix/web.key` (mode 0600) and persists across restarts. Rotate the key from the pairing popover to invalidate every paired device.
-
-### Tailscale
-
-Enable Tailscale-only mode in Settings or set `web.tailscale = true` in `config.toml`. The server binds to the tailnet IPv4 address instead of all interfaces, so only devices on your tailnet can reach it.
-
-To serve TaiX over HTTPS via `tailscale serve`, the server must already be running. Tailscale will proxy HTTPS requests to the local HTTP port.
+The phone page is a real terminal, not a log viewer: the browser picks a
+legible font size, derives the grid from its own screen and tells the desktop
+to resize the tmux window to match, so you are never reading a 137-column pane
+through a keyhole.
 
 ## Scheduled jobs
 
-Scheduled jobs run shell commands, open agent harnesses with prompts, restore saved sessions, or run git operations. Jobs fire while a TaiX window is open. To run jobs when TaiX is closed, install the systemd user timer.
-
-### Commands
+Jobs run a shell command, open a harness with a prompt, restore a session, or
+run a git operation. They fire while any TaiX window is open; install the
+systemd user timer to keep them firing when everything is closed.
 
 ```bash
 taix jobs                                  # list all jobs
-taix jobs add <name> --at <when> ...       # create a job (see below)
-taix jobs rm <id|name>                     # delete a job
-taix jobs on <id|name>                     # enable a job
-taix jobs off <id|name>                    # disable a job
-taix jobs run <id|name>                    # run a job now
-taix jobs log <id|name> [-n <lines>]       # show job output (default 200 lines)
-taix jobs history [<id|name>] [-n <runs>]  # show run history (default all jobs, 20 runs)
-taix jobs run-due                          # run due jobs (called by timer)
-taix jobs install                          # install systemd user timer
-taix jobs uninstall                        # remove systemd user timer
-```
-
-### Schedule syntax
-
-Use `--at <when>` with one of:
-
-- `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`
-- `@every 15m`, `@every 2h`, `@every 1h30m` (minutes and hours)
-- Five cron fields: `min hour day month weekday`
-- One-shot: `YYYY-MM-DD HH:MM` (fires once, then the job is disabled)
-
-Cron fields accept `*`, `*/n`, `a-b`, `a,b`, and `n`. Month and weekday names are recognized:
-- Months: `jan`, `feb`, ..., `dec` (or full names: `january`, `february`, ...)
-- Weekdays: `sun`, `mon`, ..., `sat` (or full names: `sunday`, `monday`, ...)
-
-Examples:
-
-```bash
---at "@every 30m"
---at "@daily"
---at "0 9 * * mon-fri"     # 09:00 on weekdays
---at "*/15 * * * *"        # every 15 minutes
---at "0 0 1 jan,jul *"     # midnight on Jan 1 and Jul 1
---at "2026-12-25 09:00"    # one-shot: Christmas morning 2026
-```
-
-### Job actions
-
-One of:
-
-- `--run <command>` — run a shell command
-- `--agent <harness> --ask <prompt>` — open an agent and type a prompt
-- `--session <name>` — restore a saved session
-- `--git <op>` — run `fetch`, `pull`, or `push`
-
-### Options
-
-- `--project <p>` — project id, name, or path (required for `--agent`, optional for `--git`)
-- `--cwd <dir>` — working directory for `--run` (defaults to project root)
-- `--timeout <secs>` — kill command after this many seconds (default 900)
-- `--notify <when>` — `never`, `failure` (default), or `always`
-- `--reuse` — reuse an existing window for `--agent` instead of opening a new one
-- `--no-catch-up` — skip this job if it is overdue when TaiX starts
-
-### Expansion
-
-`{project}`, `{root}`, `{date}`, and `{time}` are expanded in `--run` commands and `--ask` prompts.
-
-### Background timer
-
-Jobs run only while a TaiX window is open unless the systemd user timer is installed:
-
-```bash
-taix jobs install
-```
-
-The timer wakes every minute and runs `taix jobs run-due`. To remove it:
-
-```bash
+taix jobs add <name> --at <when> ...       # create a job
+taix jobs rm|on|off|run <id|name>          # delete, enable, disable, run now
+taix jobs log <id|name> [-n <lines>]       # output of past runs (default 200)
+taix jobs history [<id|name>] [-n <runs>]  # exit codes and durations
+taix jobs install                          # systemd user timer, wakes each minute
 taix jobs uninstall
 ```
 
+`--at` takes `@hourly` / `@daily` / `@weekly` / `@monthly` / `@yearly`,
+`@every 90m`, five cron fields, or a one-shot `YYYY-MM-DD HH:MM` that disables
+the job after it fires. Cron fields take `*`, `*/n`, `a-b`, `a,b` and `n`, and
+month and weekday names in either form:
+
+```bash
+--at "@every 30m"
+--at "0 9 * * mon-fri"     # 09:00 on weekdays
+--at "0 0 1 jan,jul *"     # midnight on 1 January and 1 July
+--at "2026-12-25 09:00"    # once
+```
+
+Cron arithmetic is done in local civil time, so a job at 09:00 stays at 09:00
+across a DST change rather than drifting an hour.
+
+Pick exactly one action:
+
+- `--run <command>` — a shell command
+- `--agent <harness> --ask <prompt>` — open an agent and type a prompt
+- `--session <name>` — restore a saved session
+- `--git <op>` — `fetch`, `pull`, or `push`
+
+And optionally: `--project <p>` (id, name or path; required for `--agent`),
+`--cwd <dir>`, `--timeout <secs>` (default 900), `--notify never|failure|always`,
+`--reuse` to take over an existing window, `--no-catch-up` to skip a job that
+was already overdue when TaiX started. `{project}`, `{root}`, `{date}` and
+`{time}` expand inside `--run` and `--ask`.
+
+## Other ways in
+
+```bash
+taix -t                 # list projects with their ids
+taix -t -s <id>         # open one as a plain tmux session, laid out like the GUI
+taix mcp                # MCP stdio server, so an agent can drive TaiX
+taix save|sessions|restore <name>
+taix doctor             # config, tmux server and harness health
+```
+
+`isolate = true` gives every new window its own git worktree on its own
+branch, and closing the window offers to merge it back or throw it away.
+
 ## Config reference
 
-All keys go in `$XDG_CONFIG_HOME/taix/config.toml` (or `~/.config/taix/config.toml`).
+All keys go in `$XDG_CONFIG_HOME/taix/config.toml`.
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `tmux_socket` | `"taix"` | tmux socket name (the `-L` argument) |
 | `tmux_session` | `"taix"` | tmux session name |
-| `idle_after_ms` | `2000` | milliseconds before an agent is marked idle |
-| `theme` | none | theme name (omit for system default) |
+| `idle_after_ms` | `2000` | milliseconds of quiet before an agent counts as idle |
+| `theme` | none | theme name (omit for the system default) |
 | `font_size` | `10.0` | pane font size in points |
 | `browser_home` | `"about:blank"` | browser panel landing page |
-| `editor` | none | editor command or catalogue id (`code`, `nvim`, etc.); falls back to `$VISUAL`, `$EDITOR` |
+| `editor` | none | editor command or catalogue id (`code`, `nvim`, …); falls back to `$VISUAL`, `$EDITOR` |
 | `isolate` | `false` | give every new window its own git worktree on a branch |
-| `bar` | `["where", "branch", "window", "windows", "memory"]` | bottom bar segments (valid: `where`, `branch`, `window`, `windows`, `memory`, `uptime`, `empty`) |
-| `reap_idle_after_ms` | none | milliseconds before an idle agent is stopped (omit to never reap) |
-| `harness_order` | `[]` | harness ids in menu order; unlisted harnesses follow in catalogue order |
+| `bar` | `["where", "branch", "window", "windows", "memory"]` | bottom bar segments (`where`, `branch`, `window`, `windows`, `memory`, `uptime`, `empty`) |
+| `reap_idle_after_ms` | none | stop an agent after this long idle (omit to never reap) |
+| `harness_order` | `[]` | harness ids in menu order; the rest follow in catalogue order |
 | `web.enabled` | `true` | start the web server |
 | `web.port` | `4040` | web server port |
-| `web.tailscale` | `false` | bind to tailnet address only |
+| `web.tailscale` | `false` | bind the tailnet address only |
 
-### Per-harness config
-
-Add or override harnesses in `[agents.<id>]` tables:
+Add or override a harness in `[agents.<id>]`:
 
 ```toml
 [agents.claude]
@@ -203,38 +218,56 @@ color = "blue"
 hidden = false
 ```
 
-All fields are optional. Omitted fields keep the catalogue defaults.
+Every field is optional; omitted ones keep the catalogue default.
+
+## What it does not do
+
+- **Linux only.** It reads `/proc` and installs systemd user units; building it
+  anywhere else fails at compile time rather than misbehaving at runtime.
+- **No packages.** No AUR, no crates.io, no release binaries. Build from source.
+- **No agent API of its own.** TaiX runs whatever CLI you already have and reads
+  its terminal. It does not talk to model providers, and it holds no API keys.
+- **One tmux server.** Everything shares the socket named in `tmux_socket`; kill
+  that server from outside and the windows go with it (the layout is restored
+  from the store on the next start).
 
 ## Troubleshooting
-
-Run the health check first:
 
 ```bash
 taix doctor
 ```
 
-This checks configuration, the tmux server, and installed harnesses.
-
-TaiX keeps going when something it can live without fails: a capture that
-did not answer, a `git` invocation that errored, a request it refused. Set
-`TAIX_LOG=1` to have those printed to stderr instead of swallowed.
+TaiX keeps going when something it can live without fails: a capture that did
+not answer, a `git` invocation that errored, a request it refused. Those are
+silent by design. `TAIX_LOG=1` prints them to stderr instead:
 
 ```bash
 TAIX_LOG=1 taix --gui
 ```
 
-### Common issues
+**Port already in use:** something else holds the web port. Change `web.port`
+or stop it.
 
-**Port already in use:** Another process is bound to the web server port. Change `web.port` in `config.toml` or stop the conflicting process.
+**tmux server gone:** the session was killed from outside. Close the window and
+reopen; the layout comes back from the store.
 
-**tmux server gone:** The tmux session was killed outside TaiX. Close the window and reopen it to start a fresh session. TaiX will restore the layout from its state database.
-
-**Agent not found:** The harness command is not on `PATH`. Check `taix harnesses` to see what TaiX detects. If an agent is installed but missing, ensure its directory is in the `PATH` that TaiX sees. The desktop inherits the launcher's `PATH`; run `taix --gui` from a terminal to inherit the shell's `PATH` instead.
+**Agent not found:** the harness command is not on the `PATH` TaiX sees. Check
+`taix harnesses`. A desktop launcher inherits the session `PATH`, not your
+shell's — start `taix --gui` from a terminal to compare.
 
 ## Desktop entry
 
-`packaging/dev.taix.TaiX.desktop` is the launcher entry. Install it with:
-
 ```bash
-install -Dm644 packaging/dev.taix.TaiX.desktop ~/.local/share/applications/dev.taix.TaiX.desktop
+install -Dm644 packaging/dev.taix.TaiX.desktop \
+  ~/.local/share/applications/dev.taix.TaiX.desktop
 ```
+
+## Contributing
+
+Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md)
+for the build, the test commands and what CI will run against your branch.
+Security reports go through [SECURITY.md](SECURITY.md), not the issue tracker.
+
+## License
+
+[Apache-2.0](LICENSE).

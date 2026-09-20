@@ -635,7 +635,11 @@ impl Hub {
 /// enumerating interfaces needs `getifaddrs` and a dependency.
 pub fn local_ip() -> Option<std::net::IpAddr> {
     let socket = std::net::UdpSocket::bind(("0.0.0.0", 0)).ok()?;
-    socket.connect(("192.168.1.1", 9)).ok()?;
+    // RFC 5737 documentation space: nothing on any LAN answers to it, so the
+    // kernel always picks the default route - the interface the phone is on.
+    // A guessed gateway like 192.168.1.1 picks the wrong one on a LAN that
+    // happens to own that prefix elsewhere.
+    socket.connect(("203.0.113.1", 9)).ok()?;
     Some(socket.local_addr().ok()?.ip())
 }
 
