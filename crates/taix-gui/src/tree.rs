@@ -23,6 +23,10 @@ pub enum Node {
         /// One per divider: pixels, or 0 for "let GTK decide".
         positions: Vec<i32>,
     },
+    Tabs {
+        ids: Vec<AgentId>,
+        active: usize,
+    },
 }
 
 /// Where on a pane a header was dropped.
@@ -33,21 +37,30 @@ pub enum Side {
     Top,
     Bottom,
     Centre,
+    Tab,
 }
 
 impl Side {
-    /// Edges are the outer quarter of each dimension; the nearest edge wins.
-    pub fn at(x: f64, y: f64, w: f64, h: f64) -> Side {
+    /// Where a dropped header lands: its own header strip makes a tab, the
+    /// outer quarter of the body picks an edge, the middle swaps. The zones
+    /// are measured inside the body, not the whole card - a card is mostly
+    /// body, and a quarter of the card would put "top" under the strip.
+    pub fn at(x: f64, y: f64, w: f64, h: f64, head: f64) -> Side {
         if w <= 0.0 || h <= 0.0 {
             return Side::Centre;
         }
+        if y < head {
+            return Side::Tab;
+        }
+        let body = (h - head).max(1.0);
+        let down = (y - head).clamp(0.0, body);
         let dx = x.min(w - x) / w;
-        let dy = y.min(h - y) / h;
+        let dy = down.min(body - down) / body;
         if dx >= 0.25 && dy >= 0.25 {
             Side::Centre
         } else if dx <= dy {
             if x < w / 2.0 { Side::Left } else { Side::Right }
-        } else if y < h / 2.0 {
+        } else if down < body / 2.0 {
             Side::Top
         } else {
             Side::Bottom
@@ -108,9 +121,19 @@ impl Node {
         match self {
             Node::Leaf(id) => out.push(*id),
             Node::Split { children, .. } => children.iter().for_each(|c| c.collect(out)),
+            Node::Tabs { ids, .. } => out.extend(ids),
         }
     }
 
+    /// Every window that is in a tab group: those cards hide their own
+    /// header, because the strip already names them.
+    pub fn tabbed(&self) -> Vec<AgentId> {
+        match self {
+            Node::Leaf(_) => Vec::new(),
+            Node::Tabs { ids, .. } => ids.clone(),
+            Node::Split { children, .. } => children.iter().flat_map(Node::tabbed).collect(),
+        }
+    }
     /// Shape only: what `encode` writes, so positions are not compared.
     fn same_shape(&self, other: &Node) -> bool {
         self.encode() == other.encode()
@@ -162,6 +185,21 @@ impl Node {
     pub fn without(self, id: AgentId) -> Option<Node> {
         match self {
             Node::Leaf(x) => (x != id).then_some(Node::Leaf(x)),
+            Node::Tabs { mut ids, active } => {
+                if let Some(i) = ids.iter().position(|x| *x == id) {
+                    ids.remove(i);
+                    match ids.len() {
+                        0 => None,
+                        1 => Some(Node::Leaf(ids[0])),
+                        n => Some(Node::Tabs {
+                            ids,
+                            active: active.min(n - 1),
+                        }),
+                    }
+                } else {
+                    Some(Node::Tabs { ids, active })
+                }
+            }
             Node::Split {
                 vertical,
                 children,
@@ -171,8 +209,6 @@ impl Node {
                 for (i, child) in children.into_iter().enumerate() {
                     match child.without(id) {
                         Some(c) => kept.push(c),
-                        // The divider that went with it: the one after this
-                        // child, or the one before when it was last.
                         None if !positions.is_empty() => {
                             positions.remove(i.min(positions.len() - 1));
                         }
@@ -191,13 +227,76 @@ impl Node {
             }
         }
     }
-
     pub fn swap(&mut self, a: AgentId, b: AgentId) {
         match self {
             Node::Leaf(x) if *x == a => *x = b,
             Node::Leaf(x) if *x == b => *x = a,
             Node::Leaf(_) => {}
+            Node::Tabs { ids, .. } => {
+                for x in ids.iter_mut() {
+                    if *x == a {
+                        *x = b;
+                    } else if *x == b {
+                        *x = a;
+                    }
+                }
+            }
             Node::Split { children, .. } => children.iter_mut().for_each(|c| c.swap(a, b)),
+        }
+    }
+    /// Pull `from` out of the tree and put it in `onto`'s tab group. Creates
+    /// the group if `onto` is a plain leaf; makes `from` the active tab.
+    pub fn tab(self, from: AgentId, onto: AgentId) -> Node {
+        let Some(tree) = self.without(from) else {
+            return Node::Leaf(from);
+        };
+        tree.insert_tab(from, onto)
+    }
+
+    fn insert_tab(self, from: AgentId, onto: AgentId) -> Node {
+        match self {
+            Node::Leaf(x) if x == onto => Node::Tabs {
+                ids: vec![onto, from],
+                active: 1,
+            },
+            Node::Tabs { mut ids, .. } if ids.contains(&onto) => {
+                ids.push(from);
+                Node::Tabs {
+                    active: ids.len() - 1,
+                    ids,
+                }
+            }
+            Node::Leaf(x) => Node::Leaf(x),
+            Node::Tabs { ids, active } => Node::Tabs { ids, active },
+            Node::Split {
+                vertical,
+                children,
+                positions,
+            } => Node::Split {
+                vertical,
+                children: children
+                    .into_iter()
+                    .map(|c| c.insert_tab(from, onto))
+                    .collect(),
+                positions,
+            },
+        }
+    }
+
+    /// Make `id` the active tab of its group. Returns whether anything changed.
+    pub fn activate(&mut self, id: AgentId) -> bool {
+        match self {
+            Node::Tabs { ids, active } => {
+                if let Some(i) = ids.iter().position(|x| *x == id)
+                    && *active != i
+                {
+                    *active = i;
+                    return true;
+                }
+                false
+            }
+            Node::Split { children, .. } => children.iter_mut().any(|c| c.activate(id)),
+            Node::Leaf(_) => false,
         }
     }
 
@@ -224,6 +323,7 @@ impl Node {
                 split(vertical, pair)
             }
             Node::Leaf(x) => Node::Leaf(x),
+            Node::Tabs { .. } => self,
             Node::Split {
                 vertical: v,
                 mut children,
@@ -233,8 +333,6 @@ impl Node {
                 match slot {
                     Some(i) if v == vertical => {
                         children.insert(if before { i } else { i + 1 }, Node::Leaf(from));
-                        // The chain's dividers no longer line up with its
-                        // children; let this one split re-settle.
                         split(v, children)
                     }
                     _ => Node::Split {
@@ -250,7 +348,7 @@ impl Node {
         }
     }
 
-    /// `h[3,v[4,5]]`: shape only, for the layout file and for change checks.
+    /// `t[2,4:1]` (tab group: ids 2 and 4, active index 1) or `h[3,v[4,5]]`.
     pub fn encode(&self) -> String {
         match self {
             Node::Leaf(id) => id.to_string(),
@@ -259,6 +357,16 @@ impl Node {
             } => {
                 let inner: Vec<String> = children.iter().map(Node::encode).collect();
                 format!("{}[{}]", if *vertical { 'v' } else { 'h' }, inner.join(","))
+            }
+            Node::Tabs { ids, active } => {
+                format!(
+                    "t[{}:{}]",
+                    ids.iter()
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    active
+                )
             }
         }
     }
@@ -279,8 +387,20 @@ impl Node {
                     return None;
                 }
                 Some((split(first == 'v', children), rest.get(1..)?))
+            } else if first == 't' {
+                let rest = s.get(1..)?.strip_prefix('[')?;
+                let end = rest.find(']')?;
+                let inner = &rest[..end];
+                let (ids_part, active_part) = inner.rsplit_once(':')?;
+                let ids: Vec<AgentId> =
+                    ids_part.split(',').filter_map(|s| s.parse().ok()).collect();
+                let active: usize = active_part.parse().ok()?;
+                if ids.len() < 2 || active >= ids.len() {
+                    return None;
+                }
+                Some((Node::Tabs { ids, active }, rest.get(end + 1..)?))
             } else {
-                let end = s.find([',', ']']).unwrap_or(s.len());
+                let end = s.find([',', ']', ':']).unwrap_or(s.len());
                 Some((Node::Leaf(s[..end].parse().ok()?), &s[end..]))
             }
         }
@@ -290,18 +410,31 @@ impl Node {
 
     /// The widget tree: a `GtkPaned` per divider, a card per leaf. A split of
     /// n children is a chain of n-1 paneds, each holding one child and the
-    /// rest, which is what makes every boundary draggable.
-    pub fn render(&self, card: &dyn Fn(AgentId) -> Option<gtk::Widget>) -> gtk::Widget {
+    /// The widget tree: a `GtkPaned` per divider, a card per leaf, a strip
+    /// plus card per tab group.
+    pub fn render(
+        &self,
+        card: &dyn Fn(AgentId) -> Option<gtk::Widget>,
+        strip: &dyn Fn(&[AgentId], usize) -> gtk::Widget,
+    ) -> gtk::Widget {
         match self {
             Node::Leaf(id) => {
                 card(*id).unwrap_or_else(|| gtk::Box::new(gtk::Orientation::Vertical, 0).upcast())
+            }
+            Node::Tabs { ids, active } => {
+                let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                container.append(&strip(ids, *active));
+                if let Some(w) = card(ids[*active]) {
+                    container.append(&w);
+                }
+                container.upcast()
             }
             Node::Split {
                 vertical,
                 children,
                 positions,
             } => {
-                let mut acc = children[children.len() - 1].render(card);
+                let mut acc = children[children.len() - 1].render(card, strip);
                 for (i, child) in children.iter().enumerate().rev().skip(1) {
                     let paned = gtk::Paned::builder()
                         .orientation(if *vertical {
@@ -309,7 +442,7 @@ impl Node {
                         } else {
                             gtk::Orientation::Horizontal
                         })
-                        .start_child(&child.render(card))
+                        .start_child(&child.render(card, strip))
                         .end_child(&acc)
                         .resize_start_child(true)
                         .resize_end_child(true)
@@ -459,14 +592,50 @@ mod tests {
     }
 
     #[test]
+    fn tab_creates_and_extends_groups() {
+        // Tabbing onto a leaf creates a group with from active.
+        let tree = Node::from_preset(&[1, 2, 3], Preset::Columns).unwrap();
+        assert_eq!(tree.clone().tab(3, 1).encode(), "h[t[1,3:1],2]");
+        // Tabbing into an existing group appends.
+        let tabbed = tree.tab(3, 1);
+        assert_eq!(tabbed.tab(2, 1).encode(), "t[1,3,2:2]");
+    }
+
+    #[test]
+    fn removing_last_but_one_tab_folds_to_leaf() {
+        let tabs = Node::Tabs {
+            ids: vec![1, 2],
+            active: 0,
+        };
+        assert_eq!(tabs.without(1), Some(leaf(2)));
+        assert_eq!(leaf(1).without(1), None);
+    }
+
+    #[test]
+    fn tab_encode_decode_round_trips() {
+        for text in ["t[2,4:1]", "t[1,2,3:0]", "h[t[1,2:1],3]"] {
+            assert_eq!(
+                Node::decode(text).map(|n| n.encode()).as_deref(),
+                Some(text)
+            );
+        }
+        // Active out of range rejected.
+        assert_eq!(Node::decode("t[1,2:2]"), None);
+        // Single-element tab rejected.
+        assert_eq!(Node::decode("t[1:0]"), None);
+    }
+
+    #[test]
     fn sides_come_from_the_nearest_edge() {
-        assert_eq!(Side::at(50.0, 50.0, 100.0, 100.0), Side::Centre);
-        assert_eq!(Side::at(5.0, 50.0, 100.0, 100.0), Side::Left);
-        assert_eq!(Side::at(95.0, 50.0, 100.0, 100.0), Side::Right);
-        assert_eq!(Side::at(50.0, 5.0, 100.0, 100.0), Side::Top);
-        assert_eq!(Side::at(50.0, 95.0, 100.0, 100.0), Side::Bottom);
+        let head = 30.0;
+        assert_eq!(Side::at(50.0, 50.0, 100.0, 100.0, head), Side::Centre);
+        assert_eq!(Side::at(50.0, 10.0, 100.0, 100.0, head), Side::Tab);
+        assert_eq!(Side::at(5.0, 50.0, 100.0, 100.0, head), Side::Left);
+        assert_eq!(Side::at(95.0, 50.0, 100.0, 100.0, head), Side::Right);
+        assert_eq!(Side::at(50.0, 35.0, 100.0, 100.0, head), Side::Top);
+        assert_eq!(Side::at(50.0, 95.0, 100.0, 100.0, head), Side::Bottom);
         // In a corner the nearer edge wins.
-        assert_eq!(Side::at(10.0, 20.0, 100.0, 100.0), Side::Left);
-        assert_eq!(Side::at(20.0, 10.0, 100.0, 100.0), Side::Top);
+        assert_eq!(Side::at(10.0, 50.0, 100.0, 100.0, head), Side::Left);
+        assert_eq!(Side::at(50.0, 35.0, 100.0, 100.0, head), Side::Top);
     }
 }

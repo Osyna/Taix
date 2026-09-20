@@ -133,6 +133,128 @@ fn handle_tools_list() -> Result<Value, (i32, String)> {
                     "required": ["agent"]
                 }
             }
+            ,
+            {
+                "name": "browser_tabs",
+                "description": "List, create, select, or close browser tabs",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "description": "list|new|select|close"},
+                        "tab": {"type": "integer"},
+                        "url": {"type": "string"},
+                        "project": {"type": "integer"},
+                        "headless": {"type": "boolean"}
+                    }
+                }
+            },
+            {
+                "name": "browser_navigate",
+                "description": "Navigate to URL or go back/forward/reload",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tab": {"type": "integer"},
+                        "url": {"type": "string"},
+                        "action": {"type": "string", "description": "goto|back|forward|reload"}
+                    }
+                }
+            },
+            {
+                "name": "browser_snapshot",
+                "description": "Get accessibility tree (actions do not return a tree, so snapshot only when you need refs)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tab": {"type": "integer"},
+                        "filter": {"type": "string"},
+                        "max": {"type": "integer"}
+                    }
+                }
+            },
+            {
+                "name": "browser_click",
+                "description": "Click element by ref from snapshot",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tab": {"type": "integer"},
+                        "ref": {"type": "string"}
+                    }
+                }
+            },
+            {
+                "name": "browser_type",
+                "description": "Type text into element by ref",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tab": {"type": "integer"},
+                        "ref": {"type": "string"},
+                        "text": {"type": "string"},
+                        "submit": {"type": "boolean"}
+                    }
+                }
+            },
+            {
+                "name": "browser_press_key",
+                "description": "Press a key (Enter, Escape, ArrowDown, etc)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tab": {"type": "integer"},
+                        "key": {"type": "string"}
+                    }
+                }
+            },
+            {
+                "name": "browser_evaluate",
+                "description": "Evaluate JavaScript on page or element",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tab": {"type": "integer"},
+                        "js": {"type": "string"},
+                        "ref": {"type": "string"}
+                    }
+                }
+            },
+            {
+                "name": "browser_wait_for",
+                "description": "Wait for text to appear, disappear, or URL to match",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tab": {"type": "integer"},
+                        "text": {"type": "string"},
+                        "gone": {"type": "string"},
+                        "url": {"type": "string"},
+                        "ms": {"type": "integer"}
+                    }
+                }
+            },
+            {
+                "name": "browser_console",
+                "description": "Get or clear console messages",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tab": {"type": "integer"},
+                        "clear": {"type": "boolean"}
+                    }
+                }
+            },
+            {
+                "name": "browser_screenshot",
+                "description": "Capture PNG screenshot to path",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tab": {"type": "integer"},
+                        "path": {"type": "string"}
+                    }
+                }
+            }
         ]
     }))
 }
@@ -151,6 +273,16 @@ fn handle_tools_call(state: &State, params: &Value) -> Result<Value, (i32, Strin
         "agent_output" => tools::agent_output(state, arguments),
         "send_to_agent" => tools::send_to_agent(state, arguments),
         "interrupt_agent" => tools::interrupt_agent(state, arguments),
+        "browser_tabs" => crate::browser::tabs(arguments),
+        "browser_navigate" => crate::browser::navigate(arguments),
+        "browser_snapshot" => crate::browser::snapshot(arguments),
+        "browser_click" => crate::browser::click(arguments),
+        "browser_type" => crate::browser::type_text(arguments),
+        "browser_press_key" => crate::browser::press_key(arguments),
+        "browser_evaluate" => crate::browser::evaluate(arguments),
+        "browser_wait_for" => crate::browser::wait_for(arguments),
+        "browser_console" => crate::browser::console(arguments),
+        "browser_screenshot" => crate::browser::screenshot(arguments),
         _ => Err(format!("unknown tool: {}", name)),
     };
 
@@ -215,7 +347,7 @@ mod tests {
         let res = handle(&state, req).unwrap();
         let v: Value = serde_json::from_str(&res).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 15);
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert_eq!(
             names,
@@ -224,7 +356,17 @@ mod tests {
                 "list_agents",
                 "agent_output",
                 "send_to_agent",
-                "interrupt_agent"
+                "interrupt_agent",
+                "browser_tabs",
+                "browser_navigate",
+                "browser_snapshot",
+                "browser_click",
+                "browser_type",
+                "browser_press_key",
+                "browser_evaluate",
+                "browser_wait_for",
+                "browser_console",
+                "browser_screenshot"
             ]
         );
     }

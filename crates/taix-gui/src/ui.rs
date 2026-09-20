@@ -6,7 +6,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 
-use taix_core::{Agent, Config, Project, ProjectId};
+use taix_core::{Agent, AgentId, Config, Project, ProjectId};
 
 /// Handles the application needs to reach after construction.
 #[derive(Clone)]
@@ -16,13 +16,8 @@ pub struct Widgets {
     pub panes: gtk::Box,
     /// sidebar | main divider.
     pub outer: gtk::Paned,
-    /// panes | browser divider. Only the browser panel repositions it.
-    #[cfg(feature = "browser")]
-    pub main: gtk::Paned,
-    #[cfg(feature = "browser")]
-    pub browser: gtk::ToggleButton,
-    /// (panes, browser) | files divider. The panel is attached on demand,
-    /// so a `Paned` with no end child is what a closed tree looks like.
+    /// panes | panel divider. The panel is attached on demand, so a `Paned`
+    /// with no end child is what a closed column looks like.
     pub files_split: gtk::Paned,
     pub files_toggle: gtk::Button,
     pub files: crate::files::Files,
@@ -160,6 +155,9 @@ pub struct AgentCard {
     /// Where a dragged header would land: a wash over the half of the pane
     /// it would take, or the whole pane for a swap.
     hint: gtk::Box,
+    /// The body area. Held so a browser window can put a web view where the
+    /// terminal text would be.
+    stage: gtk::Overlay,
 }
 
 impl AgentCard {
@@ -226,9 +224,11 @@ impl AgentCard {
         self.name_label.set_text(&agent.name);
         self.close
             .set_tooltip_text(Some(&format!("Close {}", agent.name)));
-        // No pane: the window is a record, and the way back is one click.
+        // No pane: the window is a record, and the way back is one click. A
+        // browser window never has one, so the overlay would be a lie.
         let harness = taix_core::by_id(cfg, &agent.kind);
-        self.start.set_visible(agent.pane.is_none());
+        let browser = agent.kind == taix_core::BROWSER;
+        self.start.set_visible(agent.pane.is_none() && !browser);
         crate::icons::set(&self.start_icon, harness.icon.as_deref());
         self.start_label
             .set_text(&format!("Click to start {}", harness.label));
@@ -244,6 +244,22 @@ impl AgentCard {
         }
         self.root.set_css_classes(&classes);
     }
+
+    /// Hide the card's own header: in a tab group the strip already names it.
+    pub fn set_tabbed(&self, on: bool) {
+        self.root
+            .first_child()
+            .inspect(|head| head.set_visible(!on));
+    }
+
+    /// Put something other than the terminal viewport in the body, which is
+    /// how a browser window's page lands inside an ordinary pane card.
+    pub fn set_body_widget(&self, w: Option<&gtk::Widget>) {
+        match w {
+            Some(w) => self.stage.set_child(Some(w)),
+            None => self.stage.set_child(Some(&self.viewport)),
+        }
+    }
 }
 
 /// What to show under a window's name.
@@ -252,6 +268,11 @@ impl AgentCard {
 /// repeating it underneath says nothing. Prefer the branch when the window
 /// has its own worktree, and otherwise show nothing rather than an echo.
 fn subtitle(agent: &Agent, cfg: &taix_core::Config) -> String {
+    // A window with no card of its own has to say so somewhere, or it
+    // reads as a browser that failed to open.
+    if agent.headless {
+        return "headless".into();
+    }
     if let Some(branch) = &agent.branch {
         return branch.clone();
     }
@@ -518,6 +539,7 @@ pub fn agent_card(agent: &Agent, cfg: &taix_core::Config) -> AgentCard {
         start_icon,
         start_label,
         hint,
+        stage,
         mouse: Rc::default(),
     };
     let tint = agent
@@ -526,6 +548,72 @@ pub fn agent_card(agent: &Agent, cfg: &taix_core::Config) -> AgentCard {
         .or_else(|| taix_core::by_id(cfg, &agent.kind).color);
     card.update(agent, cfg, tint.as_deref());
     card
+}
+
+/// One group's tabs: the windows sharing a pane, the active one marked.
+///
+/// Clipped like the card header for the same reason: a long tab list must
+/// not become the pane's minimum width and push every divider around.
+pub fn tab_strip(
+    items: &[(AgentId, String, Option<String>)],
+    active: usize,
+    pick: impl Fn(AgentId) + 'static,
+    close: impl Fn(AgentId) + 'static,
+) -> gtk::Widget {
+    let strip = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    strip.add_css_class("tab-strip");
+    let pick = Rc::new(pick);
+    let close = Rc::new(close);
+    for (i, (id, name, icon)) in items.iter().enumerate() {
+        let tab = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        tab.add_css_class("tab");
+        if i == active {
+            tab.add_css_class("active");
+        }
+        let mark = crate::icons::image(icon.as_deref(), 13);
+        mark.set_valign(gtk::Align::Center);
+        tab.append(&mark);
+        tab.append(
+            &gtk::Label::builder()
+                .label(name)
+                .ellipsize(gtk::pango::EllipsizeMode::End)
+                .max_width_chars(24)
+                .valign(gtk::Align::Center)
+                .build(),
+        );
+        let button = gtk::Button::builder()
+            .child(&tab)
+            .css_classes(["flat", "tab-button"])
+            .build();
+        button.connect_clicked({
+            let (pick, id) = (pick.clone(), *id);
+            move |_| pick(id)
+        });
+        strip.append(&button);
+        // Only the tab being looked at offers its close button: one per tab
+        // is a row of crosses, and closing what you cannot see is a mistake
+        // waiting to happen.
+        if i == active {
+            let shut = gtk::Button::builder()
+                .icon_name("window-close-symbolic")
+                .css_classes(["flat", "tab-close"])
+                .valign(gtk::Align::Center)
+                .build();
+            shut.connect_clicked({
+                let (close, id) = (close.clone(), *id);
+                move |_| close(id)
+            });
+            strip.append(&shut);
+        }
+    }
+    // Clipped like the card header: propagate no width, scroll horizontally.
+    let clip = gtk::ScrolledWindow::builder()
+        .child(&strip)
+        .hscrollbar_policy(gtk::PolicyType::External)
+        .vscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_width(false)
+        .build();
+    clip.upcast()
 }
 
 /// Width and height of one monospace cell for `widget`'s current font.
@@ -636,11 +724,6 @@ pub fn build(app: &adw::Application, cfg: &Config) -> Widgets {
         }
     });
     add_agent.add_controller(motion);
-    #[cfg(feature = "browser")]
-    let browser_toggle = gtk::ToggleButton::builder()
-        .icon_name("web-browser-symbolic")
-        .tooltip_text("Toggle browser panel (Ctrl-B)")
-        .build();
     // Plain buttons, not toggles: a toggle's "off" would have to mean both
     // "close the column" and "the other tab is showing", and a widget that
     // switches itself off while the app switches it on deadlocks the two.
@@ -707,12 +790,8 @@ pub fn build(app: &adw::Application, cfg: &Config) -> Widgets {
     // every error and every toast rendered into an orphan label.
     header.append(&status);
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-    actions.set_margin_start(4);
-    actions.append(&copy_button);
     actions.append(&git_toggle);
-    // The two panels, side by side, in the order they sit on screen.
-    #[cfg(feature = "browser")]
-    actions.append(&browser_toggle);
+    actions.append(&copy_button);
     actions.append(&files_toggle);
     actions.append(&automation);
     actions.append(&settings);
@@ -821,17 +900,6 @@ pub fn build(app: &adw::Application, cfg: &Config) -> Widgets {
     content.append(&find.root);
     content.set_size_request(320, -1);
 
-    // Panes | browser. The browser child is attached on demand: WebKit is
-    // expensive enough that it must not exist until asked for.
-    let main = gtk::Paned::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .start_child(&content)
-        .resize_start_child(true)
-        .shrink_start_child(false)
-        .resize_end_child(true)
-        .shrink_end_child(false)
-        .build();
-
     // Files and Git share the one side column: two panels at once would
     // leave neither wide enough to read, and they answer the same question
     // - what is in this project right now.
@@ -891,11 +959,11 @@ pub fn build(app: &adw::Application, cfg: &Config) -> Widgets {
     panel_body.append(&panel_tabs);
     panel_body.append(&panel_stack);
 
-    // (panes, browser) | panel divider. The panel is attached on demand,
-    // so a `Paned` with no end child is what a closed panel looks like.
+    // panes | panel divider. The panel is attached on demand, so a `Paned`
+    // with no end child is what a closed panel looks like.
     let files_split = gtk::Paned::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .start_child(&main)
+        .start_child(&content)
         .resize_start_child(true)
         .shrink_start_child(false)
         .resize_end_child(false)
@@ -1015,8 +1083,6 @@ pub fn build(app: &adw::Application, cfg: &Config) -> Widgets {
         let window = window.clone();
         move |_| window.close()
     });
-    #[cfg(feature = "browser")]
-    browser_toggle.add_css_class("icon");
     files_toggle.add_css_class("icon");
     git_toggle.add_css_class("icon");
 
@@ -1024,10 +1090,6 @@ pub fn build(app: &adw::Application, cfg: &Config) -> Widgets {
         window,
         panes,
         outer,
-        #[cfg(feature = "browser")]
-        main,
-        #[cfg(feature = "browser")]
-        browser: browser_toggle,
         files_split,
         files_toggle,
         files,

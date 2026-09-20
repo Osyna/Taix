@@ -7,7 +7,7 @@
 
 mod app;
 #[cfg(feature = "browser")]
-mod browser;
+pub mod browser;
 mod compare;
 mod files;
 mod find;
@@ -426,14 +426,6 @@ fn wire(shared: &Shared, w: &ui::Widgets) {
         move |_| shared.borrow_mut().close_find()
     });
 
-    #[cfg(feature = "browser")]
-    {
-        w.browser.connect_toggled({
-            let shared = shared.clone();
-            move |button| shared.borrow_mut().toggle_browser(button.is_active())
-        });
-    }
-
     // One button per tab: it opens the column on that tab, and pressing the
     // lit one closes the column.
     w.files_toggle.connect_clicked({
@@ -523,8 +515,7 @@ fn wire(shared: &Shared, w: &ui::Widgets) {
             if ctrl && shift {
                 match key {
                     Key::N | Key::n => w.add_agent.emit_clicked(),
-                    #[cfg(feature = "browser")]
-                    Key::B | Key::b => w.browser.set_active(!w.browser.is_active()),
+                    Key::B | Key::b => shared.borrow_mut().open_browser_window(),
                     Key::T | Key::t => w.files_toggle.emit_clicked(),
                     Key::G | Key::g => w.git_toggle.emit_clicked(),
                     Key::V | Key::v => shared.borrow().paste(),

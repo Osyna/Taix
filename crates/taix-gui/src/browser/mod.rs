@@ -8,18 +8,41 @@
 //! Built on demand — WebKit spawns its own network and web-content processes,
 //! so an unopened panel must cost nothing.
 
+mod driver;
+
+const AGENT_JS: &str = include_str!("agent.js");
 use gtk::prelude::*;
 use webkit6::prelude::*;
+
+/// Who is waiting for the page to finish loading, if anyone.
+type Waiting = std::rc::Rc<std::cell::RefCell<Option<Box<dyn FnOnce(serde_json::Value)>>>>;
 
 pub struct Browser {
     pub root: gtk::Box,
     view: webkit6::WebView,
     url: gtk::Entry,
+    /// A navigation that answered the instant `load_uri` returned would
+    /// answer about the old page, and the agent's next snapshot would read
+    /// it. The reply waits here for the load to finish.
+    waiting: Waiting,
 }
 
 impl Browser {
     pub fn new(home_uri: &str) -> Browser {
-        let view = webkit6::WebView::new();
+        // window.__taix exists on every document, including after navigation.
+        let content_manager = webkit6::UserContentManager::new();
+        let script = webkit6::UserScript::new(
+            AGENT_JS,
+            webkit6::UserContentInjectedFrames::TopFrame,
+            webkit6::UserScriptInjectionTime::Start,
+            &[], // allow list (empty = all origins)
+            &[], // block list
+        );
+        content_manager.add_script(&script);
+
+        let view = webkit6::WebView::builder()
+            .user_content_manager(&content_manager)
+            .build();
         view.set_hexpand(true);
         view.set_vexpand(true);
         // The developer tools are WebKit's own: enabling extras is what puts
@@ -151,7 +174,35 @@ impl Browser {
             false
         });
 
-        let browser = Browser { root, view, url };
+        let waiting = Waiting::default();
+        // A navigation is answered here, when the document is actually
+        // there to be read, rather than when `load_uri` returns. The short
+        // delay is for the title: WebKit sets it just after the load
+        // finishes, and an answer without it makes the caller ask again.
+        view.connect_load_changed({
+            let waiting = waiting.clone();
+            move |view, event| {
+                if event != webkit6::LoadEvent::Finished {
+                    return;
+                }
+                let (waiting, view) = (waiting.clone(), view.clone());
+                gtk::glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(120),
+                    move || {
+                        if let Some(reply) = waiting.borrow_mut().take() {
+                            reply(page_state(&view));
+                        }
+                    },
+                );
+            }
+        });
+
+        let browser = Browser {
+            root,
+            view,
+            url,
+            waiting,
+        };
         browser.load(home_uri);
         browser
     }
@@ -159,6 +210,83 @@ impl Browser {
     pub fn load(&self, target: &str) {
         go(&self.view, &self.url, target);
     }
+
+    /// Current URI, or `None` on the start page.
+    pub fn uri(&self) -> Option<String> {
+        self.view
+            .uri()
+            .filter(|u| u != "about:blank")
+            .map(|u| u.to_string())
+    }
+
+    pub fn title(&self) -> Option<String> {
+        self.view.title().map(|t| t.to_string())
+    }
+
+    /// Called whenever the page moves, so the window can remember where it
+    /// was: a browser window reopens on the page it was left on.
+    pub fn on_uri_changed(&self, f: impl Fn(String) + 'static) {
+        self.view.connect_uri_notify(move |view| {
+            if let Some(uri) = view.uri().filter(|u| u != "about:blank") {
+                f(uri.to_string());
+            }
+        });
+    }
+
+    /// Run one op from the agent-facing contract and answer exactly once.
+    ///
+    /// Navigation is the one op that cannot answer immediately: it answers
+    /// when the document has loaded, because the next thing the caller does
+    /// is read that document.
+    pub fn dispatch(
+        &self,
+        op: &serde_json::Value,
+        reply: impl FnOnce(serde_json::Value) + 'static,
+    ) {
+        let goto = op.get("op").and_then(serde_json::Value::as_str) == Some("navigate")
+            && op
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("goto")
+                == "goto";
+        if !goto {
+            driver::dispatch(&self.view, op, reply);
+            return;
+        }
+        let Some(target) = op.get("url").and_then(serde_json::Value::as_str) else {
+            reply(serde_json::json!({ "ok": false, "error": "navigate needs a url" }));
+            return;
+        };
+        // A second navigation while one is in flight answers the first: the
+        // caller is owed exactly one answer per op, even a superseded one.
+        if let Some(previous) = self.waiting.borrow_mut().take() {
+            previous(page_state(&self.view));
+        }
+        *self.waiting.borrow_mut() = Some(Box::new(reply));
+        self.load(target);
+        // A page that never finishes loading - a dead host, a hanging
+        // socket - must not park the caller until its own timeout.
+        gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(20), {
+            let (waiting, view) = (self.waiting.clone(), self.view.clone());
+            move || {
+                if let Some(reply) = waiting.borrow_mut().take() {
+                    let mut state = page_state(&view);
+                    state["loading"] = serde_json::json!(true);
+                    reply(state);
+                }
+            }
+        });
+    }
+}
+
+/// What every op that touches the page answers with, so an agent always
+/// knows where it ended up without asking again.
+fn page_state(view: &webkit6::WebView) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "url": view.uri().unwrap_or_default().to_string(),
+        "title": view.title().unwrap_or_default().to_string(),
+    })
 }
 
 /// Navigate, or show the start page. Nothing to load is not an error and
@@ -214,7 +342,7 @@ fn undock(split: &gtk::Paned) {
 /// says nothing about what to do next, so the blank target is rendered as a
 /// document instead - painted from the installed palette, because a web view
 /// is the one surface GTK's stylesheet cannot reach.
-const START: &str = include_str!("../start.html");
+const START: &str = include_str!("../../start.html");
 
 fn start_page() -> String {
     START

@@ -104,6 +104,12 @@ pub struct WindowView {
     /// absent while the window has no pane.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tmux: Option<String>,
+    /// Browser window URL; absent for terminal windows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Browser runs headless (no desktop window).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub headless: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

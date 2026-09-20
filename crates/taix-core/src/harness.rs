@@ -33,10 +33,18 @@ pub struct Harness {
 /// The id reserved for "just a shell, nothing launched".
 pub const TERMINAL: &str = "terminal";
 
+/// The id reserved for an embedded browser window.
+pub const BROWSER: &str = "browser";
+
 impl Harness {
     /// True for the plain-terminal entry: no harness is launched in it.
     pub fn is_terminal(&self) -> bool {
         self.id == TERMINAL
+    }
+
+    /// True for the browser entry: a WebKit window with no tmux pane.
+    pub fn is_browser(&self) -> bool {
+        self.id == BROWSER
     }
 
     fn new(id: &str, label: &str, command: &str) -> Harness {
@@ -71,6 +79,13 @@ impl Harness {
 pub fn terminal() -> Harness {
     let mut h = Harness::new(TERMINAL, "Terminal", "");
     h.icon = Some("terminal".into());
+    h
+}
+
+/// The embedded browser, always available: it is built into the desktop.
+pub fn browser() -> Harness {
+    let mut h = Harness::new(BROWSER, "Browser", "");
+    h.icon = Some("web-browser-symbolic".into());
     h
 }
 
@@ -163,7 +178,11 @@ impl Entry {
             .agents
             .get(&self.harness.id)
             .is_some_and(|k| !k.command.is_empty());
-        !self.hidden && (self.installed || configured || self.harness.is_terminal())
+        !self.hidden
+            && (self.installed
+                || configured
+                || self.harness.is_terminal()
+                || self.harness.is_browser())
     }
 }
 
@@ -176,7 +195,7 @@ pub fn entries(cfg: &Config) -> Vec<Entry> {
         let custom = cfg.agents.get(&h.id);
         let hidden = custom.is_some_and(|k| k.hidden);
         let h = h.customised(custom);
-        let installed = h.is_terminal() || is_installed(&h.command);
+        let installed = h.is_terminal() || h.is_browser() || is_installed(&h.command);
         Entry {
             harness: h,
             installed,
@@ -185,11 +204,12 @@ pub fn entries(cfg: &Config) -> Vec<Entry> {
         }
     };
     out.push(entry(terminal(), true));
+    out.push(entry(browser(), true));
     for h in catalog() {
         out.push(entry(h, true));
     }
     for (id, kind) in &cfg.agents {
-        if id != TERMINAL && !catalog().iter().any(|c| &c.id == id) {
+        if id != TERMINAL && id != BROWSER && !catalog().iter().any(|c| &c.id == id) {
             out.push(entry(Harness::new(id, &kind.label, &kind.command), false));
         }
     }
@@ -241,6 +261,9 @@ pub fn by_id(cfg: &Config, id: &str) -> Harness {
     let custom = cfg.agents.get(id);
     if id == TERMINAL {
         return terminal().customised(custom);
+    }
+    if id == BROWSER {
+        return browser().customised(custom);
     }
     if let Some(found) = catalog().into_iter().find(|h| h.id == id) {
         return found.customised(custom);
@@ -470,6 +493,8 @@ mod tests {
             branch: None,
             window: None,
             pane: None,
+            url: None,
+            headless: false,
             color: None,
             named: false,
             state: AgentState::Idle,

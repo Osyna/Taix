@@ -48,6 +48,10 @@ pub struct Agent {
     pub pane: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub headless: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub named: bool,
     pub state: AgentState,
@@ -486,18 +490,20 @@ impl Store {
     /// difference between a dashboard and a liar.
     pub fn reconcile(&self, alive: impl Fn(u32) -> bool) -> Result<Vec<Agent>> {
         let terminal = crate::terminal().id;
+        let browser = crate::harness::browser().id;
         self.mutate(|d| {
             d.agents.retain(|a| {
-                a.pane.is_some_and(&alive)
+                a.kind == browser
+                    || a.pane.is_some_and(&alive)
                     || a.kind != terminal
                     || a.worktree.is_some()
                     || a.named
                     || a.state == AgentState::Starting
             });
             for a in &mut d.agents {
-                // No pane yet is not a dead pane: `spawn` assigns it a
-                // moment after the row exists, and a reload from another
-                // process can land in between.
+                if a.kind == browser {
+                    continue;
+                }
                 let Some(pane) = a.pane else { continue };
                 if alive(pane) {
                     continue;
@@ -511,7 +517,6 @@ impl Store {
             Ok(d.agents.clone())
         })
     }
-
     pub fn add_agent(&self, new: &NewAgent) -> Result<Agent> {
         self.mutate(|d| {
             d.next_agent += 1;
@@ -525,6 +530,8 @@ impl Store {
                 window: None,
                 pane: None,
                 color: None,
+                url: None,
+                headless: false,
                 named: false,
                 state: AgentState::Starting,
             };
@@ -547,6 +554,24 @@ impl Store {
             if let Some(agent) = d.agents.iter_mut().find(|a| a.id == id) {
                 agent.window = window;
                 agent.pane = pane;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn set_url(&self, id: AgentId, url: Option<String>) -> Result<()> {
+        self.mutate(|d| {
+            if let Some(agent) = d.agents.iter_mut().find(|a| a.id == id) {
+                agent.url = url;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn set_headless(&self, id: AgentId, headless: bool) -> Result<()> {
+        self.mutate(|d| {
+            if let Some(agent) = d.agents.iter_mut().find(|a| a.id == id) {
+                agent.headless = headless;
             }
             Ok(())
         })
@@ -1491,5 +1516,80 @@ mod tests {
         let path = dir.path().join("state.toml");
         std::fs::write(&path, "next_project = 1\n").unwrap();
         assert!(Store::open(&path).unwrap().projects().is_ok());
+    }
+
+    #[test]
+    fn browser_agent_never_reaped_by_reconcile() {
+        let store = Store::open_memory().unwrap();
+        let proj = store.add_project("test", Path::new("/tmp/test")).unwrap();
+
+        let browser = store
+            .add_agent(&NewAgent {
+                project: proj.id,
+                name: "Browser".into(),
+                kind: crate::harness::BROWSER.into(),
+                worktree: None,
+                branch: None,
+            })
+            .unwrap();
+
+        store
+            .set_url(browser.id, Some("https://example.com".into()))
+            .unwrap();
+        store.set_headless(browser.id, true).unwrap();
+
+        // Browser has no pane; reconcile with all panes dead should not remove it.
+        let agents = store.reconcile(|_| false).unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].id, browser.id);
+        assert_eq!(agents[0].url.as_deref(), Some("https://example.com"));
+        assert!(agents[0].headless);
+    }
+
+    #[test]
+    fn old_state_without_url_headless_loads() {
+        let (dir, store) = temp_store();
+        let proj = store.add_project("test", Path::new("/tmp/test")).unwrap();
+
+        let agent = store
+            .add_agent(&NewAgent {
+                project: proj.id,
+                name: "agent1".into(),
+                kind: "claude".into(),
+                worktree: None,
+                branch: None,
+            })
+            .unwrap();
+
+        // An old state.toml: the file a previous build wrote, with no url
+        // and no headless flag.
+        let toml = r#"
+next_project = 1
+next_agent = 1
+next_job = 0
+
+[[projects]]
+id = 1
+name = "test"
+root = "/tmp/test"
+
+[[agents]]
+id = 1
+project = 1
+name = "agent1"
+kind = "claude"
+state = "starting"
+"#;
+
+        std::fs::write(dir.path().join("state.toml"), toml).unwrap();
+
+        // Reopen the store; should load without error.
+        let reopened = Store::open(&dir.path().join("state.toml")).unwrap();
+        let loaded = reopened.agent(agent.id).unwrap().unwrap();
+
+        assert_eq!(loaded.id, agent.id);
+        assert_eq!(loaded.name, "agent1");
+        assert_eq!(loaded.url, None);
+        assert!(!loaded.headless);
     }
 }

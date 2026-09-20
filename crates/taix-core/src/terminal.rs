@@ -207,6 +207,8 @@ mod tests {
             worktree: worktree.map(PathBuf::from),
             branch: None,
             window: None,
+            url: None,
+            headless: false,
             pane: None,
             color: None,
             named: false,

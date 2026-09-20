@@ -1080,6 +1080,56 @@ button.git-tool.git-more { min-width: 22px; padding: 0 4px; }
   box-shadow: inset 0 0 0 2px @taix_accent;
 }
 
+/* Tab strip: horizontal, icon + name per tab, active marked, close on active.
+   Same glass and hairline language as the pane header. */
+.tab-strip {
+  padding: 6px 8px;
+  background: @taix_glass_hi;
+  border-bottom: 1px solid @taix_hairline;
+}
+.tab-button {
+  padding: 0;
+  min-height: 0;
+  border-radius: 6px;
+}
+.tab {
+  padding: 5px 10px;
+  border-radius: 6px;
+  background: transparent;
+  transition: background 110ms cubic-bezier(0.2, 0, 0.2, 1);
+}
+.tab label {
+  font-size: 11px;
+  color: mix(@taix_dim, @taix_fg, 0.45);
+}
+.tab image {
+  color: mix(@taix_dim, @taix_fg, 0.35);
+  -gtk-icon-size: 13px;
+}
+.tab-button:hover .tab {
+  background: alpha(@taix_fg, 0.05);
+}
+.tab.active {
+  background: alpha(@taix_fg, 0.08);
+}
+.tab.active label {
+  color: mix(@taix_fg, white, 0.3);
+  font-weight: 500;
+}
+.tab.active image {
+  color: mix(@taix_fg, white, 0.3);
+}
+.tab-close {
+  padding: 0 2px;
+  min-height: 18px;
+  min-width: 18px;
+  color: @taix_dim;
+  -gtk-icon-size: 12px;
+}
+.tab-close:hover {
+  color: @taix_failed;
+}
+
 /* Dividers: a 1px hairline that still catches the pointer for a drag. The
    focused pane is marked by its header tint, not a border, so the divider is
    the only line between two panes. */

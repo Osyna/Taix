@@ -118,7 +118,7 @@ takes the whole keyboard; TaiX keeps only `Ctrl+Shift`.
 | `Ctrl+Shift+N` | New window |
 | `Ctrl+Shift+T` | Toggle files panel |
 | `Ctrl+Shift+G` | Toggle git panel |
-| `Ctrl+Shift+B` | Toggle browser panel (with `--features browser`) |
+| `Ctrl+Shift+B` | Open, or go to, this project's browser window |
 | `Ctrl+Shift+P` | Command palette |
 | `Ctrl+Shift+F` | Find in pane |
 | `Ctrl+Shift+R` | Rename focused window |
@@ -136,6 +136,52 @@ takes the whole keyboard; TaiX keeps only `Ctrl+Shift`.
 | `Ctrl+Shift+↑` / `↓` | Scroll pane history one line |
 | `Ctrl+Tab` | Cycle focus |
 | `Shift+PgUp` / `PgDn` | Scroll pane history one page |
+
+Drop one pane's header on another pane's **body edge** to split there, on its
+**middle** to swap the two, and on its **header** to put both in one tab
+group. Tabs are a desktop arrangement: underneath they are still separate
+tmux windows, still visible to the TUI and the phone.
+
+## The browser, and letting an agent drive it
+
+A browser window is a window of a project, opened from the same menu as an
+agent (or `Ctrl+Shift+B`), and it keeps its page when you switch to another
+project and back. Each project can have several.
+
+Any agent running in a TaiX pane can drive those windows through the MCP
+server, so you watch it work on the page instead of reading about it:
+
+```bash
+claude mcp add taix taix mcp     # or: codex mcp add taix taix mcp
+```
+
+Ten tools, named after Playwright MCP's because that is what models already
+know: `browser_tabs`, `browser_navigate`, `browser_snapshot`,
+`browser_click`, `browser_type`, `browser_press_key`, `browser_evaluate`,
+`browser_wait_for`, `browser_console`, `browser_screenshot`.
+
+The token budget is the design. `browser_snapshot` returns an accessibility
+outline of the interactive and structural nodes only - `- button "Save"
+[ref=e7]` - capped and cut to what fits; `filter` narrows it to the matches
+and their path. Every other tool answers in one line ("clicked button
+\"Save\""), never a fresh tree, so a ten-step flow costs one snapshot, not
+ten. Screenshots exist but are the last resort, not the interface.
+
+```
+browser_navigate {"url": "localhost:5173"}     -> http://localhost:5173/ · Order form
+browser_snapshot {}                            -> 8 lines with refs
+browser_type     {"ref": "e4", "text": "Ada"}  -> typed "Ada" into input:text
+browser_click    {"ref": "e7"}                 -> clicked button "Place order"
+browser_console  {}                            -> log: order Ada s
+```
+
+`browser_tabs {"action":"new","headless":true}` opens a window with no card
+on screen: same driving, nothing taking up the grid, for the checks you do
+not want to watch. Headless windows have no screenshot - there is no surface
+to photograph - and are marked *headless* in the window list.
+
+The tools talk to the running desktop over its own LAN port on localhost, so
+`taix --gui` has to be up; without it they say so rather than hanging.
 
 ## The phone
 

@@ -292,9 +292,11 @@ function renderWindow(win, projectId) {
   const isFocused = shown() === win.id;
   const isDriving = driving(win.id);
   
-  // subtitle: state · age when idle, mem · state when alive
+  // subtitle: for browser windows show the URL; for terminals show state/mem
   let subtitle = '';
-  if (win.alive) {
+  if (win.kind === 'browser' && win.url) {
+    subtitle = win.url;
+  } else if (win.alive) {
     const parts = [];
     if (win.mem_kib) parts.push(bytes(win.mem_kib));
     parts.push(win.state);
@@ -319,7 +321,7 @@ function renderWindow(win, projectId) {
         if (borrowed) send({ kind: 'release', window: win.id });
       },
     });
-  const quickActions = win.state === 'waiting' && win.alive
+  const quickActions = win.kind !== 'browser' && win.state === 'waiting' && win.alive
     ? h(
         'div',
         { class: 'win-quick' },
@@ -413,7 +415,7 @@ function openWindowMenu(win, anchor) {
       run: () => send({ kind: win.alive ? 'kill' : 'start', window: win.id }),
     },
     '-',
-    win.tmux && {
+    win.tmux && win.kind !== 'browser' && {
       label: 'Copy tmux command',
       hint: 'ssh, then paste',
       run: () => copy(win.tmux),

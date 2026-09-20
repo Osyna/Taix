@@ -142,6 +142,12 @@ impl Web {
         self.server.as_ref().map(|s| s.hub().as_ref())
     }
 
+    /// A handle that outlives the borrow, for work that answers later: a
+    /// page replies on its own schedule, long after the frame that asked.
+    pub fn hub_owned(&self) -> Option<std::sync::Arc<Hub>> {
+        self.server.as_ref().map(|s| s.hub().clone())
+    }
+
     pub fn health(&self) -> Health {
         match &self.server {
             Some(server) => server.hub().health(),

@@ -25,8 +25,8 @@ mod watcher;
 
 pub use config::{AgentKind, Config, random_key, set_web_key, web_key};
 pub use harness::{
-    Entry, Harness, TERMINAL, adopt_shell_path, available, by_id, catalog, entries, next_name,
-    running_harnesses, shell_path, terminal, which,
+    BROWSER, Entry, Harness, TERMINAL, adopt_shell_path, available, browser, by_id, catalog,
+    entries, next_name, running_harnesses, shell_path, terminal, which,
 };
 pub use project_config::ProjectConfig;
 pub use store::{Action, Agent, Job, NewAgent, NewJob, Notify, Project, Run, Store, purge_project};

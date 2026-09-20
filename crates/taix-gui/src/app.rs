@@ -29,6 +29,7 @@ use crate::presets::Preset;
 use crate::tree::{Node, Side};
 use crate::ui::{self, AgentCard, Widgets};
 use crate::web::Web;
+mod browse;
 mod git;
 mod memory;
 mod redraw;
@@ -232,8 +233,11 @@ pub struct App {
     /// What is on screen: the shape it was rendered from and its root, so a
     /// rebuild can read the dividers back and skip re-rendering the same shape.
     laid_out: Option<(String, gtk::Widget)>,
+    /// One live web view per browser window, kept alive while its project
+    /// is not on screen: a page an agent is driving must not be thrown away
+    /// because somebody looked at another project.
     #[cfg(feature = "browser")]
-    browser: Option<crate::browser::Browser>,
+    browsers: HashMap<AgentId, crate::browser::Browser>,
     /// Whether the file tree is attached. The panel itself always exists;
     /// this is what says its rows should.
     files_open: bool,
@@ -397,9 +401,13 @@ enum Pointer {
     /// Clicked the "click to start" mark of a window with no pane: open a
     /// pane for it again, old scrollback in front.
     Start(AgentId),
-    /// A header was dropped on another pane: split it on that side, or swap
-    /// the two when dropped in the middle.
+    /// A header was dropped on another pane: split it on that side, swap
+    /// the two when dropped in the middle, and tab them when dropped on
+    /// the other pane's header.
     Dock(AgentId, AgentId, Side),
+    /// A browser window's page moved, so the window remembers where it was.
+    #[cfg(feature = "browser")]
+    BrowserUrl(AgentId, String),
     /// Send Ctrl-C to it.
     Interrupt(AgentId),
     /// Kill its process and keep the window, the way `Ctrl-D` at a prompt
@@ -569,7 +577,7 @@ impl App {
             trees,
             laid_out: None,
             #[cfg(feature = "browser")]
-            browser: None,
+            browsers: HashMap::new(),
             files_open: false,
             font_pt,
             saved_layout,
@@ -844,9 +852,16 @@ impl App {
         // A pane header dragged here: the payload is the other window's id,
         // the side it hovers is where it lands.
         let dock = gtk::DropTarget::new(glib::Type::I64, gtk::gdk::DragAction::MOVE);
+        // The header band is the tab zone: a card dropped on another card's
+        // name joins it as a tab, the edges still split. The band's height
+        // is asked of the widget rather than assumed, because the theme's
+        // padding decides it.
         let side_at = {
             let root = card.root.clone();
-            move |x: f64, y: f64| Side::at(x, y, root.width() as f64, root.height() as f64)
+            move |x: f64, y: f64| {
+                let head = root.first_child().map_or(0, |h| h.height()) as f64;
+                Side::at(x, y, root.width() as f64, root.height() as f64, head)
+            }
         };
         let (hint, at) = (card.clone(), side_at.clone());
         dock.connect_motion(move |_, x, y| {
@@ -953,6 +968,8 @@ impl App {
             Pointer::Restart(id) => self.restart(id)?,
             Pointer::Start(id) => self.relaunch(id)?,
             Pointer::Dock(from, onto, side) => self.dock(from, onto, side),
+            #[cfg(feature = "browser")]
+            Pointer::BrowserUrl(id, url) => self.browser_url(id, url),
             Pointer::Interrupt(id) => {
                 self.set_focus(id);
                 if let Some(pane) = self.focused_pane() {
@@ -1011,6 +1028,11 @@ impl App {
                 self.select_project(project);
                 let terminal = taix_core::terminal();
                 self.spawn(project, &terminal).map(drop)?;
+            }
+            // A browser window is not a tmux window: it has a page rather
+            // than a pane, so the menu entry routes past `spawn` entirely.
+            Pointer::Spawn(project, harness) if harness == taix_core::BROWSER => {
+                self.open_browser(project, None, false).map(drop)?;
             }
             Pointer::Spawn(project, harness) => {
                 self.select_project(project);
@@ -1832,13 +1854,16 @@ impl App {
         self.refresh_bar();
     }
 
+    /// The windows this screen lays out: the selected project's, less the
+    /// headless browser windows, which exist for agents and have no card.
     fn visible(&self) -> Vec<AgentId> {
         self.rows
             .iter()
-            .filter(|r| Some(r.agent.project) == self.selected)
+            .filter(|r| Some(r.agent.project) == self.selected && !r.agent.headless)
             .map(|r| r.agent.id)
             .collect()
     }
+
     /// Only the selected project's agents get widgets. Everything else is a
     /// `Row` with an unparented card and no emulator.
     ///
@@ -1846,6 +1871,7 @@ impl App {
     /// on every tmux event would throw away divider positions the user
     /// dragged, and tmux resizes fire events constantly.
     fn rebuild_grid(&mut self) {
+        self.ensure_browsers();
         let ids = self.visible();
         self.harvest();
         let tree = self
@@ -1860,12 +1886,23 @@ impl App {
         if let (Some(p), Some(t)) = (self.selected, tree) {
             self.trees.insert(p, t);
         }
+        // Tabbed cards hide their own header; a card that has just left a
+        // group gets it back. Done before rendering, because the strip is
+        // built from the same tree.
+        let tabbed = shown.as_ref().map(Node::tabbed).unwrap_or_default();
+        for id in &ids {
+            if let Some(row) = self.row(*id) {
+                row.card.set_tabbed(tabbed.contains(id));
+            }
+        }
         let shape = shown.as_ref().map(Node::encode);
         if shape != self.laid_out.as_ref().map(|(s, _)| s.clone()) {
             let widget = ui::set_pane_tree(&self.w, || {
-                shown
-                    .as_ref()
-                    .map(|t| t.render(&|id| self.row(id).map(|r| r.card.root.clone().upcast())))
+                shown.as_ref().map(|t| {
+                    t.render(&|id| self.card_widget(id), &|ids, active| {
+                        self.tab_strip(ids, active)
+                    })
+                })
             });
             self.laid_out = shape.zip(widget);
         }
@@ -1901,7 +1938,8 @@ impl App {
         }
     }
 
-    /// A header dropped on a pane: its edges split, its middle swaps.
+    /// A header dropped on a pane: its edges split, its middle swaps, and
+    /// its own header strip takes it as a tab.
     fn dock(&mut self, from: AgentId, onto: AgentId, side: Side) {
         let Some(project) = self.selected else { return };
         self.harvest();
@@ -1914,6 +1952,7 @@ impl App {
                 tree.swap(from, onto);
                 tree
             }
+            Side::Tab => tree.tab(from, onto),
             side => tree.dock(from, onto, side),
         };
         self.trees.insert(project, tree);
@@ -1937,6 +1976,15 @@ impl App {
             row.card.root.add_css_class("focused");
         }
         self.focus = Some(id);
+        // Focusing a window that is behind another tab has to bring it to
+        // the front, or the focused card is one nobody can see.
+        if self
+            .selected
+            .and_then(|p| self.trees.get_mut(&p))
+            .is_some_and(|tree| tree.activate(id))
+        {
+            self.rebuild_grid();
+        }
         self.reseed_focus();
         // The sidebar marks the focused window; it must move with the click,
         // not with the next reload.
@@ -2232,36 +2280,6 @@ impl App {
         self.zoom(self.cfg.font_size - self.font_pt);
     }
 
-    /// Attach or detach the browser panel. The `WebView` is created on first
-    /// use — WebKit spawns its own processes, so an unopened panel costs zero.
-    #[cfg(feature = "browser")]
-    pub fn toggle_browser(&mut self, on: bool) {
-        if !on {
-            // Remember where the divider sat before tearing the panel down.
-            if self.browser.is_some() {
-                self.saved_layout.browser = self.w.main.position();
-            }
-            self.w.main.set_end_child(None::<&gtk::Widget>);
-            self.browser = None;
-            return;
-        }
-        if self.browser.is_some() {
-            return;
-        }
-        let browser = crate::browser::Browser::new(&self.cfg.browser_home);
-        self.w.main.set_end_child(Some(&browser.root));
-        let width = self.w.main.width();
-        let position = match self.saved_layout.browser {
-            saved if saved > 0 && saved < width => saved,
-            _ if width > 0 => (width * 3) / 5,
-            _ => self.saved_layout.browser,
-        };
-        if position > 0 {
-            self.w.main.set_position(position);
-        }
-        self.browser = Some(browser);
-    }
-
     /// A header button was pressed: open the column on that tab, or close
     /// it if that tab is already what is showing.
     pub fn click_panel(&mut self, tab: Panel) {
@@ -2359,14 +2377,6 @@ impl App {
     /// never opened keeps whatever width was last stored rather than
     /// recording a meaningless zero.
     pub fn save_layout(&self) {
-        #[cfg(feature = "browser")]
-        let browser = if self.browser.is_some() {
-            self.w.main.position()
-        } else {
-            self.saved_layout.browser
-        };
-        #[cfg(not(feature = "browser"))]
-        let browser = self.saved_layout.browser;
         let files = if self.files_open {
             self.files_width()
         } else {
@@ -2375,7 +2385,6 @@ impl App {
 
         crate::layout::Layout {
             sidebar: self.w.outer.position(),
-            browser,
             files,
             folded: self.folded.clone(),
             muted: self.muted.clone(),
@@ -2618,6 +2627,7 @@ impl App {
     pub fn tick(&mut self) {
         self.drain_pointer();
         self.drain_web();
+        self.drain_browser_ops();
         self.apply_git_result();
         // A project can be shown without anyone selecting it - `reload` picks
         // the first one - so the startup windows are opened from the frame,

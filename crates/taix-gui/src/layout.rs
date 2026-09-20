@@ -10,7 +10,6 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
     pub sidebar: i32,
-    pub browser: i32,
     /// Width of the file tree, not the divider's position: the divider moves
     /// with the window, the panel's width is what the user chose.
     pub files: i32,
@@ -31,7 +30,6 @@ impl Default for Layout {
     fn default() -> Self {
         Layout {
             sidebar: 262,
-            browser: 0,
             files: 280,
             folded: Vec::new(),
             muted: Vec::new(),
@@ -68,9 +66,8 @@ impl Layout {
         let _ = std::fs::write(
             path,
             format!(
-                "sidebar={}\nbrowser={}\nfiles={}\nfolded={}\nmuted={}\npreset={}\n{trees}",
+                "sidebar={}\nfiles={}\nfolded={}\nmuted={}\npreset={}\n{trees}",
                 self.sidebar,
-                self.browser,
                 self.files,
                 ids(&self.folded),
                 ids(&self.muted),
@@ -121,7 +118,6 @@ fn parse(text: &str) -> Layout {
         match key.trim() {
             // A stored zero or negative would collapse the pane on restore.
             "sidebar" if value > 0 => layout.sidebar = value,
-            "browser" if value > 0 => layout.browser = value,
             "files" if value > 0 => layout.files = value,
             _ => {}
         }
@@ -137,7 +133,6 @@ mod tests {
     fn round_trips_through_the_file_format() {
         let saved = Layout {
             sidebar: 310,
-            browser: 940,
             files: 300,
             folded: vec![2, 7],
             muted: vec![4],
@@ -145,11 +140,12 @@ mod tests {
             trees: vec![(3, "h[1,v[2,3]]".to_string())],
         };
         let text = format!(
-            "sidebar={}\nbrowser={}\nfiles={}\nfolded=2,7\nmuted=4\npreset=main-left\ntree.3=h[1,v[2,3]]\n",
-            saved.sidebar, saved.browser, saved.files
+            "sidebar={}\nfiles={}\nfolded=2,7\nmuted=4\npreset=main-left\ntree.3=h[1,v[2,3]]\n",
+            saved.sidebar, saved.files
         );
         assert_eq!(parse(&text), saved);
-        // A file from the build before the tree existed still loads.
+        // A file from a build that still wrote the browser panel's divider
+        // loads: an unknown key is ignored, not a parse failure.
         assert_eq!(
             parse("sidebar=310\nbrowser=940\n").files,
             Layout::default().files
@@ -179,13 +175,13 @@ mod tests {
         assert_eq!(parse("garbage\nsidebar\n"), d);
         assert_eq!(parse("sidebar=abc"), d);
         // A partial file keeps the default for the missing key.
-        assert_eq!(parse("sidebar=300").browser, d.browser);
+        assert_eq!(parse("sidebar=300").files, d.files);
         assert_eq!(parse("sidebar=300").sidebar, 300);
     }
 
     #[test]
     fn nonpositive_positions_are_rejected() {
         // Restoring 0 would render a collapsed, apparently broken window.
-        assert_eq!(parse("sidebar=0\nbrowser=-5"), Layout::default());
+        assert_eq!(parse("sidebar=0\nfiles=-5"), Layout::default());
     }
 }

@@ -19,7 +19,19 @@ pub mod html;
 mod http;
 pub mod proto;
 
-use std::collections::VecDeque;
+/// One question from an out-of-process client, waiting for the GUI thread.
+#[derive(Debug, Clone)]
+pub struct Ask {
+    pub id: u64,
+    pub body: serde_json::Value,
+}
+
+/// Where an answer lands, and the connection thread parked on it.
+type Slot = Arc<(Mutex<Option<serde_json::Value>>, Condvar)>;
+
+/// Questions in flight at once. Past this a client is looping, not working.
+const MAX_ASKS: usize = 32;
+use std::collections::{HashMap, VecDeque};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -164,6 +176,11 @@ pub struct Hub {
     /// fed on every request). Capped at 32.
     ledger: Mutex<Vec<(String, String, Instant)>>,
     waker: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    /// Ask/answer: connection threads park on their slot, the GUI thread
+    /// drains the queue on tick and fills the slot when the page answers.
+    ask_seq: AtomicU64,
+    asks: Mutex<VecDeque<Ask>>,
+    ask_pending: Mutex<HashMap<u64, Slot>>,
 }
 
 /// The picture at one revision, in two forms: whole, for a browser that
@@ -216,6 +233,9 @@ impl Hub {
             pending: Mutex::new(Vec::new()),
             ledger: Mutex::new(Vec::new()),
             waker: Mutex::new(None),
+            ask_seq: AtomicU64::new(0),
+            asks: Mutex::new(VecDeque::new()),
+            ask_pending: Mutex::new(HashMap::new()),
         }
     }
 
@@ -616,6 +636,75 @@ impl Hub {
         }
     }
 
+    /// Queue a question for the desktop and park until it answers.
+    ///
+    /// Called on an HTTP thread. The answer arrives whole frames later - a
+    /// page decides when it has loaded - so this is the one place in the
+    /// crate that blocks a connection thread on the UI thread.
+    pub fn ask(
+        &self,
+        body: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, String> {
+        let id = self.ask_seq.fetch_add(1, Ordering::Relaxed);
+        let slot = Arc::new((Mutex::new(None), Condvar::new()));
+        {
+            let mut asks = self.asks.lock();
+            // A runaway agent must not be able to grow this without bound;
+            // refusing is information, a queue thirty deep is not.
+            if asks.len() >= MAX_ASKS {
+                return Err("too many browser requests are already in flight".into());
+            }
+            asks.push_back(Ask { id, body });
+            self.ask_pending.lock().insert(id, slot.clone());
+        }
+        self.wake();
+
+        let (lock, bell) = &*slot;
+        let mut answer = lock.lock();
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(answer) = answer.take() {
+                self.ask_pending.lock().remove(&id);
+                return Ok(answer);
+            }
+            if Instant::now() >= deadline {
+                self.ask_pending.lock().remove(&id);
+                self.asks.lock().retain(|a| a.id != id);
+                return Err(format!(
+                    "the desktop did not answer in {}s",
+                    timeout.as_secs()
+                ));
+            }
+            bell.wait_until(&mut answer, deadline);
+        }
+    }
+
+    /// Called on the GUI thread: everything asked since the last frame.
+    pub fn take_asks(&self) -> Vec<Ask> {
+        self.asks.lock().drain(..).collect()
+    }
+
+    /// Called on the GUI thread, possibly long after `take_asks`: hand one
+    /// answer back to the connection waiting for it.
+    ///
+    /// The slot is cloned out before it is filled. Holding both locks here
+    /// would take them in the opposite order to `ask`, which is a deadlock
+    /// waiting for a slow page.
+    pub fn answer(&self, id: u64, result: serde_json::Value) {
+        let slot = self.ask_pending.lock().get(&id).cloned();
+        if let Some(slot) = slot {
+            let (lock, bell) = &*slot;
+            *lock.lock() = Some(result);
+            bell.notify_one();
+        }
+    }
+
+    /// Whether the GUI has anything to answer, without taking the queue.
+    pub fn asks_waiting(&self) -> bool {
+        !self.asks.lock().is_empty()
+    }
+
     /// Stop accepting, hang up every stream, and unblock the listener by
     /// knocking on it: `accept` has no timeout, and a dropped `TcpListener`
     /// in another thread does not wake it.
@@ -807,5 +896,76 @@ mod tests {
         );
         assert_eq!(sparse.panes[0].id, 1, "changed pane should be pane 1");
         assert_eq!(sparse.panes[0].cols, 120, "updated cols should be present");
+    }
+
+    #[test]
+    fn ask_that_is_answered_returns_the_answer() {
+        let hub = Arc::new(Hub::detached());
+        let hub2 = hub.clone();
+
+        let handle = std::thread::spawn(move || {
+            hub2.ask(
+                serde_json::json!({"action": "test"}),
+                Duration::from_secs(5),
+            )
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+        let asks = hub.take_asks();
+        assert_eq!(asks.len(), 1);
+        assert_eq!(asks[0].body["action"], "test");
+
+        hub.answer(asks[0].id, serde_json::json!({"result": "ok"}));
+
+        let result = handle.join().unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap()["result"], "ok");
+    }
+
+    #[test]
+    fn ask_that_times_out_returns_error_and_cleans_up() {
+        let hub = Arc::new(Hub::detached());
+        let hub2 = hub.clone();
+
+        let handle = std::thread::spawn(move || {
+            hub2.ask(
+                serde_json::json!({"action": "timeout"}),
+                Duration::from_millis(100),
+            )
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(hub.take_asks().len(), 1);
+
+        // Nothing answers it: the caller gets the timeout, not a hang.
+        let result = handle.join().unwrap();
+        let message = result.unwrap_err();
+        assert!(message.contains("did not answer"), "{message}");
+        assert_eq!(
+            hub.ask_pending.lock().len(),
+            0,
+            "a timed-out ask must not leave its slot behind"
+        );
+    }
+
+    #[test]
+    fn ask_refuses_when_queue_is_full() {
+        let hub = Hub::detached();
+
+        // Fill the queue to capacity (32)
+        for i in 0..32 {
+            hub.asks.lock().push_back(Ask {
+                id: i,
+                body: serde_json::json!({"n": i}),
+            });
+        }
+
+        // Next ask should be refused
+        let result = hub.ask(
+            serde_json::json!({"overflow": true}),
+            Duration::from_secs(1),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too many"));
     }
 }

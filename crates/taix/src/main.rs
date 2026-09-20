@@ -395,10 +395,10 @@ fn cli_harnesses() -> ExitCode {
 
     println!("offered here:");
     for harness in &available {
-        let what = if harness.command.is_empty() {
-            "login shell".to_string()
-        } else {
-            harness.command.clone()
+        let what = match () {
+            _ if harness.is_browser() => "embedded web view".to_string(),
+            _ if harness.command.is_empty() => "login shell".to_string(),
+            _ => harness.command.clone(),
         };
         println!("  {:<22} {:<16} {what}", harness.label, harness.id);
     }

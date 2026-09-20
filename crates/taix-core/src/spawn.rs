@@ -94,6 +94,43 @@ pub fn window(
     }
 }
 
+/// Create a browser window: an agent with no tmux pane, drivable through MCP.
+///
+/// `existing` is the project's current agents, used to pick the next free name.
+pub fn browser_window(
+    store: &Store,
+    _cfg: &Config,
+    project: &Project,
+    existing: &[Agent],
+    headless: bool,
+) -> Result<Agent, String> {
+    let harness = crate::harness::browser();
+    let name = next_name(existing, &harness);
+
+    let new = NewAgent {
+        project: project.id,
+        name,
+        kind: harness.id.clone(),
+        worktree: None,
+        branch: None,
+    };
+    let agent = store.add_agent(&new).map_err(|e| e.to_string())?;
+    // Nothing is starting: there is no process to wait for, and a window
+    // that says STARTING forever is a lie the whole UI repeats.
+    store
+        .set_state(agent.id, crate::AgentState::Idle)
+        .map_err(|e| e.to_string())?;
+    if headless {
+        store
+            .set_headless(agent.id, true)
+            .map_err(|e| e.to_string())?;
+    }
+    let mut agent = agent;
+    agent.state = crate::AgentState::Idle;
+    agent.headless = headless;
+    Ok(agent)
+}
+
 /// Open a window again for an agent whose pane is gone: same directory,
 /// same harness command as the config says today, the old scrollback
 /// replayed in front. The record stays what it was; only its pane is new.

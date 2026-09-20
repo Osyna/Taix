@@ -1961,6 +1961,7 @@ version = "0.1.0"
 dependencies = [
  "gtk4",
  "libadwaita",
+ "serde_json",
  "taix-core",
  "taix-git",
  "taix-term",

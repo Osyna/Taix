@@ -40,6 +40,7 @@ pub(crate) fn route(req: &Req, hub: &Arc<crate::Hub>) -> Reply {
         ("GET", "/api/file") => file(req, hub),
         ("POST", "/api/file") => file_op(req, hub),
         ("POST", "/api/upload") => upload(req),
+        ("POST", "/api/browser") => browser(req, hub),
         ("GET", "/api/git") => git(req, hub),
         ("GET", "/api/worktree") => worktree(req, hub),
         ("GET", "/api/diff") => diff(req, hub),
@@ -187,6 +188,23 @@ fn upload(req: &Req) -> Reply {
             .to_string(),
         ),
         Err(e) => Reply::fail(500, &e.to_string()),
+    }
+}
+
+/// Ask the desktop to do something in a browser window; the GUI answers
+/// asynchronously. Used by the MCP server to drive WebKitGTK.
+fn browser(req: &Req, hub: &Arc<crate::Hub>) -> Reply {
+    let body: serde_json::Value = match serde_json::from_slice(&req.body) {
+        Ok(v) => v,
+        Err(e) => return Reply::fail(400, &e.to_string()),
+    };
+
+    match hub.ask(body, std::time::Duration::from_secs(30)) {
+        Ok(result) => Reply::json(200, serde_json::to_string(&result).unwrap_or_default()),
+        Err(e) => Reply::json(
+            200,
+            serde_json::json!({ "ok": false, "error": e }).to_string(),
+        ),
     }
 }
 #[derive(Deserialize)]

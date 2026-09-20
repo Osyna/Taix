@@ -419,7 +419,11 @@ impl App {
                             .unwrap_or_else(|| crate::icons::FALLBACK.to_string()),
                         tint: tint(&self.cfg, &row.agent),
                         state: row.agent.state.as_str().to_string(),
-                        alive: row.agent.pane.is_some(),
+                        // A browser window has a page rather than a pane;
+                        // it is alive when it has one.
+                        alive: row.agent.pane.is_some() || row.agent.url.is_some(),
+                        url: row.agent.url.clone(),
+                        headless: row.agent.headless,
                         attention: row.agent.state.needs_attention(),
                         branch: row.git.clone(),
                         mem_kib: row.mem_kib,
