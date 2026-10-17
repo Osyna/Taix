@@ -203,6 +203,7 @@ impl App {
             }
             WebCmd::Scroll { window, delta } => self.scroll_pane(window, delta),
             WebCmd::ScrollBottom { window } => self.scroll_to_bottom(window),
+            WebCmd::Prompt { window, delta } => self.jump_prompt(window, delta),
             WebCmd::Grid { window, cols, rows } => {
                 // Clamped here rather than trusted: the numbers come off a
                 // page, and tmux reflows every line of scrollback to them.
@@ -242,7 +243,7 @@ impl App {
             WebCmd::Kill { window } => self.apply_pointer(Pointer::Kill(window))?,
             WebCmd::Interrupt { window } => self.apply_pointer(Pointer::Interrupt(window))?,
             WebCmd::Restart { window } => self.apply_pointer(Pointer::Restart(window))?,
-            WebCmd::Start { window } => self.apply_pointer(Pointer::Start(window))?,
+            WebCmd::Start { window } => self.start_pane(window).map(drop)?,
             WebCmd::Rename { window, name } => self.apply_pointer(Pointer::Rename(window, name))?,
             WebCmd::Recolor { window, color } => {
                 self.apply_pointer(Pointer::Recolor(window, color))?
@@ -271,32 +272,39 @@ impl App {
                 }
                 self.save_layout();
             }
+            WebCmd::Fold { project, folded } => {
+                if self.folded.contains(&project) != folded {
+                    self.apply_pointer(Pointer::ToggleFold(project))?;
+                }
+            }
             WebCmd::Merge { window } => self.merge_worktree(window)?,
             WebCmd::Notice { text } => ui::set_status(&self.w, &text),
         }
         Ok(())
     }
 
-    /// Which panes the web page needs a screen for: what this screen shows,
-    /// plus whatever a browser says it is looking at, plus anything a
-    /// browser is driving.
+    /// Which panes the web page needs a screen for: whatever a browser says
+    /// it is looking at, plus anything a browser is driving.
     ///
-    /// The last two are the whole point: a laptop on the LAN can sit on a
-    /// project the desktop is not showing, and those rows have no widget
-    /// here, so nothing else would ever capture them.
+    /// Not what this screen shows: a phone looking at one pane must not
+    /// cost a capture of every pane on the desktop. A laptop on the LAN can
+    /// sit on a project the desktop is not showing, too; those rows have no
+    /// widget here, so nothing else would ever capture them.
     fn web_screens(&self) -> Vec<AgentId> {
-        let mut ids = self.visible();
-        for id in self.web.watched().into_iter().chain(self.web.remote()) {
-            if !ids.contains(&id) && self.rows.iter().any(|r| r.agent.id == id) {
+        let mut ids = self.web.watched();
+        for id in self.web.remote() {
+            if !ids.contains(&id) {
                 ids.push(id);
             }
         }
+        ids.retain(|id| self.rows.iter().any(|r| r.agent.id == *id));
         ids
     }
 
-    /// Rebuild the screens the web page draws, at the same cadences the
-    /// desktop redraws at: the focused pane from its live emulator, the
-    /// rest from a capture on the snapshot interval.
+    /// Rebuild the screens the web page draws. A pane a browser drives, and
+    /// the desktop's focused pane, come from a live emulator; the rest from
+    /// a capture - only once they printed something since the last one, at
+    /// the snapshot interval.
     ///
     /// Only ever called with a browser connected, which is what keeps the
     /// whole feature free for a user who never opens it.
@@ -304,35 +312,72 @@ impl App {
         let now = Instant::now();
         let ids = self.web_screens();
         let tmux = &self.tmux;
+        let web = &self.web;
+        // A hold that ended takes its emulator with it; the capture path
+        // looks at the pane again at once.
+        for row in &mut self.rows {
+            if row.web_live.is_some() && !web.holds(row.agent.id) {
+                row.web_live = None;
+                row.web_snap = now.checked_sub(WEB_RESYNC).unwrap_or(now);
+            }
+        }
         for id in ids {
             let Some(row) = self.rows.iter_mut().find(|r| r.agent.id == id) else {
                 continue;
             };
             let Some(pane) = row.agent.pane else {
-                row.web_html.clear();
+                row.web_screen = Default::default();
                 continue;
             };
             if row.scroll > 0 {
                 let size = pane_size(tmux, pane);
                 let up = row.scroll as i32;
                 let captured = cmd::capture_range(tmux, pane, -up, size.rows as i32 - 1 - up, true);
-                row.web_html = taix_web::html::screen(|sink| {
+                row.web_screen = taix_web::html::screen(|sink| {
                     taix_term::snapshot(size, &captured, &mut |chunk| sink(chunk))
                 });
                 row.web_size = size;
+                row.web_alt = false;
+                // Back at the bottom, the live screen is due at once.
+                row.web_snap = now.checked_sub(WEB_RESYNC).unwrap_or(now);
+                row.web_dirty = true;
                 continue;
             }
-            match &row.live {
+            // Seeded once from a capture, then fed by the output stream:
+            // `seed_seq` keeps the seed's own screen from printing twice.
+            if row.live.is_none() && row.web_live.is_none() && web.holds(id) {
+                let Some(seed) = cmd::seed(tmux, pane) else {
+                    continue;
+                };
+                let live = primed(&seed);
+                row.card.mouse.set(live.mouse());
+                row.web_live = Some(live);
+                row.seed_seq = seed.seq;
+                row.web_dirty = true;
+            }
+            match row.live.as_ref().or(row.web_live.as_ref()) {
                 Some(live) => {
-                    row.web_html = taix_web::html::screen(|sink| {
-                        live.render(&mut |chunk| sink(chunk));
-                    });
-                    // The emulator's own grid, which is the widget's, not
-                    // tmux's idea of it a frame ago.
-                    row.web_size = live.size();
+                    if row.web_dirty || row.web_screen.is_empty() {
+                        row.web_screen = taix_web::html::screen(|sink| {
+                            live.render(&mut |chunk| sink(chunk));
+                        });
+                        // The emulator's own grid, which is the widget's, not
+                        // tmux's idea of it a frame ago.
+                        row.web_size = live.size();
+                        row.web_alt = live.alt_screen();
+                        row.web_dirty = false;
+                    }
                 }
                 None => {
-                    if now.duration_since(row.web_snap) < SNAPSHOT_INTERVAL {
+                    // Quiet panes are looked at again now and then all the
+                    // same: tmux reflows a resized one without printing.
+                    let printed = row.active > row.web_snap;
+                    let wait = if printed {
+                        SNAPSHOT_INTERVAL
+                    } else {
+                        WEB_RESYNC
+                    };
+                    if !row.web_screen.is_empty() && now.duration_since(row.web_snap) < wait {
                         continue;
                     }
                     row.web_snap = now;
@@ -343,12 +388,13 @@ impl App {
                         cols: seed.cols,
                         rows: seed.rows,
                     };
-                    row.web_html = taix_web::html::screen(|sink| {
+                    row.web_screen = taix_web::html::screen(|sink| {
                         taix_term::snapshot(size, &seed.screen, &mut |chunk| sink(chunk))
                     });
                     // A pane with no widget here is whatever size tmux has
                     // it at: the page draws that, not this screen's layout.
                     row.web_size = size;
+                    row.web_alt = seed.alt;
                 }
             }
         }
@@ -358,6 +404,10 @@ impl App {
     /// nothing changed, so an idle session sends nothing at all.
     pub(super) fn publish_web(&mut self) {
         if self.web.clients() == 0 {
+            // Nobody left to feed an emulator for.
+            for row in &mut self.rows {
+                row.web_live = None;
+            }
             return;
         }
         if self.last_web_publish.elapsed() < WEB_INTERVAL {
@@ -380,6 +430,14 @@ impl App {
         if let Some(hub) = self.web.hub() {
             hub.publish(snapshot);
             hub.set_roots(self.projects.iter().map(|p| p.root.clone()).collect());
+            if std::mem::take(&mut self.history_dirty) {
+                hub.set_history(
+                    self.rows
+                        .iter()
+                        .map(|r| (r.agent.id, r.shell.commands().cloned().collect()))
+                        .collect(),
+                );
+            }
         }
     }
 
@@ -419,11 +477,13 @@ impl App {
                             .unwrap_or_else(|| crate::icons::FALLBACK.to_string()),
                         tint: tint(&self.cfg, &row.agent),
                         state: row.agent.state.as_str().to_string(),
+                        since: row.state_since,
                         // A browser window has a page rather than a pane;
                         // it is alive when it has one.
                         alive: row.agent.pane.is_some() || row.agent.url.is_some(),
                         url: row.agent.url.clone(),
                         headless: row.agent.headless,
+                        ports: row.procs.0.clone(),
                         attention: row.agent.state.needs_attention(),
                         branch: row.git.clone(),
                         mem_kib: row.mem_kib,
@@ -440,17 +500,19 @@ impl App {
             .web_screens()
             .into_iter()
             .filter_map(|id| self.row(id))
-            .filter(|row| !row.web_html.is_empty())
+            .filter(|row| !row.web_screen.is_empty())
             .map(|row| p::PaneView {
                 id: row.agent.id,
                 cols: row.web_size.cols,
                 rows: row.web_size.rows,
                 scroll: row.scroll,
                 mouse: row.card.mouse.get().wanted(),
-                html: Some(row.web_html.clone()),
+                alt: row.web_alt,
+                screen: row.web_screen.clone(),
             })
             .collect();
-        let uptime = self.launched.elapsed().as_secs();
+        // Whole minutes: in seconds it would be a new snapshot every second.
+        let uptime = self.launched.elapsed().as_secs() / 60 * 60;
         let shell = std::env::var("SHELL")
             .ok()
             .and_then(|s| {
@@ -465,9 +527,9 @@ impl App {
             .map(|(_, v)| v.clone())
             .unwrap_or_default();
         p::Snapshot {
-            rev: 0,
             lock: p::LockView {
                 remote: self.web.remote(),
+                ..Default::default()
             },
             host: hostname().to_string(),
             session: p::SessionView {
@@ -479,7 +541,6 @@ impl App {
             selected: self.selected,
             focus: self.focus,
             zoomed: self.zoomed,
-            pane_ids: None,
             panes,
             bar: self.web_bar(),
             harnesses: self.web_slow.harnesses.clone(),

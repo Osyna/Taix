@@ -93,6 +93,16 @@ impl App {
     ) -> Result<AgentId, String> {
         Err("this build has no browser: rebuild with --features gui".into())
     }
+
+    /// No page of our own to put it in: the desktop's browser.
+    pub(super) fn open_url(&mut self, _project: ProjectId, url: &str) -> Result<(), String> {
+        gtk::gio::AppInfo::launch_default_for_uri(url, gtk::gio::AppLaunchContext::NONE)
+            .map_err(|e| format!("cannot open {url}: {e}"))
+    }
+
+    pub(super) fn open_link(&mut self, project: ProjectId, url: &str) -> Result<(), String> {
+        self.open_url(project, url)
+    }
 }
 
 #[cfg(feature = "browser")]
@@ -201,6 +211,37 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Show `url` in the project's browser window, opening one if it has
+    /// none: a port clicked in the process monitor lands beside the pane
+    /// that serves it.
+    pub(super) fn open_url(&mut self, project: ProjectId, url: &str) -> Result<(), String> {
+        let existing = self
+            .rows
+            .iter()
+            .find(|r| {
+                r.agent.project == project
+                    && r.agent.kind == taix_core::BROWSER
+                    && !r.agent.headless
+            })
+            .map(|r| r.agent.id);
+        let Some(id) = existing else {
+            return self.open_browser(project, Some(url), false).map(drop);
+        };
+        self.select_project(project);
+        self.set_focus(id);
+        self.open_view(id, Some(url));
+        if let Some(browser) = self.browsers.get(&id) {
+            browser.load(url);
+        }
+        Ok(())
+    }
+
+    /// A link clicked in a pane: always a new tab, so the page it came
+    /// from (or the one already open) stays where it was.
+    pub(super) fn open_link(&mut self, project: ProjectId, url: &str) -> Result<(), String> {
+        self.open_browser(project, Some(url), false).map(drop)
     }
 
     /// The page moved: remember it, so the window reopens where it was.

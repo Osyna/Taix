@@ -23,21 +23,16 @@ desktop is the pane you scroll on the sofa.
 
 ## Quick start
 
-Download the static build — one file, no dependencies beyond `tmux`, runs on
-any glibc or musl distribution:
-
-```bash
-curl -fsSL https://github.com/Osyna/Taix/releases/latest/download/taix-x86_64-linux-musl.tar.gz | tar xz
-install -Dm755 taix-*/taix ~/.local/bin/taix
-```
-
-Or build it:
+Build from source with Rust and Cargo:
 
 ```bash
 git clone https://github.com/Osyna/Taix.git
 cd Taix
-cargo build --release          # target/release/taix - the CLI and the TUI
+cargo build --release
+install -Dm755 target/release/taix ~/.local/bin/taix
 ```
+
+Make sure `~/.local/bin` is on your `PATH`.
 
 You need `tmux` on `PATH`. Then:
 
@@ -50,10 +45,9 @@ You get the terminal UI with your project in the sidebar. Press `n` to open an
 agent window, `t` for a plain shell, `Enter` to type into the focused pane and
 `Ctrl-]` to stop typing. `?` lists the keys, `q` quits.
 
-`taix harnesses` shows which agent CLIs it found. TaiX knows 30 of them
-(Claude Code, Codex, Gemini CLI, Aider, Goose, Crush, OpenCode and so on) and
-offers the ones that are actually on your `PATH`. Anything it does not know
-you add yourself in the config.
+`taix harnesses` shows which agent CLIs it found. The catalogue includes
+Claude Code, Codex, Gemini CLI, Aider, Goose, Crush and OpenCode.
+TaiX offers the ones on your `PATH`; add other harnesses in the config.
 
 <details>
 <summary>The desktop window, and what each distribution needs</summary>
@@ -69,9 +63,6 @@ compiles on a machine with no GTK at all.
 | Debian 12, Ubuntu 22.04 | yes | no: GTK 4.8 / 4.6, libadwaita 1.2 / 1.1 |
 | Alpine, anything musl | yes (static build) | build it yourself |
 
-Verified by building and running on each: Debian 12 and 13, Ubuntu 22.04 and
-24.04, Fedora 42, Arch, Alpine 3.22.
-
 ```bash
 # Debian 13 / Ubuntu 24.04
 sudo apt install libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev tmux
@@ -80,11 +71,12 @@ sudo dnf install gtk4-devel libadwaita-devel webkitgtk6.0-devel tmux
 # Arch
 sudo pacman -S gtk4 libadwaita webkitgtk-6.0 tmux
 
-cargo build --release -p taix --features gui   # target/release/taix-gui
+cargo build --release -p taix --features gui
+install -Dm755 target/release/taix ~/.local/bin/taix
+install -Dm755 target/release/taix-gui ~/.local/bin/taix-gui
 taix --gui
 ```
 
-The release also carries a prebuilt `taix-gui` for glibc 2.39 and newer.
 Building from source needs Rust 1.85 or newer (edition 2024): Debian 13,
 Fedora and Arch ship that, Ubuntu 24.04 and Debian 12 do not — use
 [rustup](https://rustup.rs) there.
@@ -197,20 +189,88 @@ The tools talk to the running desktop over its own LAN port on localhost, so
 Turn the web server on in Settings or set `web.enabled = true`. It listens on
 port 4040 and the status bar shows the LAN address to type.
 
-The page is not open to the network. A device with no pairing cookie gets a
-pairing page and nothing else; the desktop raises an amber chip, you tap Pair
-or Deny, and the approved device gets a cookie bound to its IP. The key lives
-at `$XDG_DATA_HOME/taix/web.key` (mode 0600) and survives restarts — rotate it
-from the pairing popover to drop every paired device at once.
+The main interface requires pairing. A device with no pairing cookie gets a
+pairing page; the desktop raises an amber chip, you tap Pair or Deny, and the
+approved device gets a cookie bound to its IP. The key lives at
+`$XDG_DATA_HOME/taix/web.key` (mode 0600) and survives restarts. Rotate it from
+the pairing popover to drop every paired device at once.
 
 Set `web.tailscale = true` to bind the tailnet address instead of every
-interface. To put HTTPS in front of it, start TaiX first and then
-`tailscale serve` the local port.
+interface. *HTTPS over Tailscale* in Settings → Web runs `tailscale serve` for
+you; the pairing link and its QR code then point at the `https://….ts.net`
+address. Scan the code with the phone's camera to pair.
 
 The phone page is a real terminal, not a log viewer: the browser picks a
 legible font size, derives the grid from its own screen and tells the desktop
 to resize the tmux window to match, so you are never reading a 137-column pane
 through a keyhole.
+
+The page holds one WebSocket to the desktop: every change - a new window, a
+state flip, a screen - arrives as it happens, and keystrokes go up the same
+connection in order. When the connection drops, it reconnects by itself.
+
+Each page receives only the panes it is watching and the rows that changed.
+A hidden tab stops receiving pane updates.
+
+It also installs as an app. Over HTTPS (the `tailscale serve` address, or
+`localhost`) the browser offers "Install" - or pick *Install TaiX as an app*
+from the command palette - and the installed app opens even while the
+desktop is unreachable, then reconnects. Over plain HTTP on the LAN,
+browsers refuse service workers, so there is no offline start or install
+prompt there.
+
+Over HTTPS, Settings on the phone offers two more things: lock-screen alerts
+when an agent waits (Web Push - on iPhone only from the Home Screen app; the
+VAPID key and subscriptions live in `$XDG_DATA_HOME/taix/`), and *Require
+Face ID on this device*, a passkey the server checks before it lets that phone
+in again after five idle minutes or a restart.
+
+On the terminal itself: swipe sideways for the next window, drag to scroll
+(it reaches full-screen programs as the wheel), long-press to select and copy
+rows. Long-press a key in the row to add your own. Turn the phone sideways for
+two terminals at once.
+
+The first key in the key row switches between a staged line and live typing.
+Use live typing for shell completion and interactive TUIs. Attach files with
+the picker, paste a screenshot, or type `@` to find a project file; numbered
+chips let you refer to each attachment in the line.
+
+### Sharing a terminal
+
+**Share read-only** in a window's menu creates a link to that window's screen.
+Anyone with the link can view it without pairing, so check the terminal for
+credentials and private addresses before sharing. Links expire after an hour;
+revoke them in Settings → Read-only links. Rotating the pairing key revokes
+all of them.
+
+Name each browser in Settings → This device. Other devices show who is driving
+a window; **Send to…** offers a window to another connected browser.
+
+An iPad gets the desktop's layout instead: projects, terminal, panels. In
+portrait the project list is a drawer behind ☰. You type straight into the
+pane, so a hardware keyboard works the way it does on a laptop (⌘K palette,
+⌘1-9 windows, ⌘[ ⌘] previous and next). With the on-screen keyboard up, the
+key row sits above it for esc, tab, arrows and a sticky ctrl.
+
+## Headless, in a Proxmox LXC
+
+TaiX can run with no display: a headless sway hosts the window and the web
+page on port 4040 is the whole interface (the desktop layout in a laptop
+browser, the phone layout on a phone). On a Proxmox VE host, with `taix` and
+`taix-gui` built by `cargo build --release -p taix --features gui`:
+
+```bash
+packaging/proxmox/taix-lxc.sh target/release        # new CT, next free id
+packaging/proxmox/taix-lxc.sh target/release "$CT_ID" # set CT_ID to the container to update
+```
+
+It creates an unprivileged Debian 13 container (`STORAGE`, `BRIDGE`,
+`MEMORY`, `CORES`, `DISK` override the defaults), installs tmux, sway and the
+GTK runtime, makes zsh with oh-my-zsh root's shell, installs Oh My Pi (`omp`),
+passes `/dev/net/tun` through for Tailscale, enables
+`taix-host.service` and prints the pairing link with its key. Nobody is at a
+screen to press Approve, so pair with that link. Restarting the service
+keeps the tmux server and every agent in it.
 
 ## Scheduled jobs
 
@@ -240,6 +300,13 @@ month and weekday names in either form:
 --at "2026-12-25 09:00"    # once
 ```
 
+`--on <event>` replaces the clock: `agent-waiting`, `agent-idle`, `port-up:5173`
+(a window started serving that port), `job-done:<id>` (that job just
+succeeded, so `--on job-done:3` is "run after job 3") or `job-failed:<id>`.
+The open window reports each event once as it happens; a job never runs twice
+for one. Each run's output is kept (64 KiB, last 20 runs) and shows on the web
+page's Jobs panel, where a run can be run again.
+
 Cron arithmetic is done in local civil time, so a job at 09:00 stays at 09:00
 across a DST change rather than drifting an hour.
 
@@ -255,6 +322,33 @@ And optionally: `--project <p>` (id, name or path; required for `--agent`),
 `--reuse` to take over an existing window, `--no-catch-up` to skip a job that
 was already overdue when TaiX started. `{project}`, `{root}`, `{date}` and
 `{time}` expand inside `--run` and `--ask`.
+
+## Shell integration
+
+A shell that marks its prompts with OSC 133 lets TaiX remember what each
+terminal ran. The web page's **History** panel (clock icon) lists the shown
+window's commands with ✓/✗ exit status and duration, and its search box looks
+through every window; the **↑ ↓** buttons in a pane's header jump to the
+previous/next prompt in its scrollback. Without the marks both stay empty.
+
+```bash
+# bash, in ~/.bashrc (PS0 needs bash 4.4)
+PROMPT_COMMAND='printf "\e]133;D;%s\a\e]133;A\a" "$?"'"${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+PS1="$PS1"'\[\e]133;B\a\]'
+PS0=$'\e]133;C\a'
+
+# zsh, in ~/.zshrc
+precmd()  { print -n "\e]133;D;$?\a\e]133;A\a" }
+preexec() { print -n "\e]133;C\a" }
+PS1="$PS1%{"$'\e]133;B\a'"%}"
+```
+
+fish 4.0 and newer send the marks on their own. Prompt frameworks usually have
+an option for them too (Powerlevel10k: `POWERLEVEL9K_TERM_SHELL_INTEGRATION=true`),
+and a framework that rebuilds `PS1` each prompt needs the `B` mark added there
+instead. TaiX keeps the last 200 commands per window in memory only. The command
+text is read from what the shell echoed, so a line edited with cursor keys can
+read wrong; fish sends the exact line.
 
 ## Other ways in
 
@@ -295,7 +389,7 @@ Add or override a harness in `[agents.<id>]`:
 ```toml
 [agents.claude]
 label = "Claude"
-command = "claude --api-key ..."
+command = "claude"
 icon = "claude"
 color = "blue"
 hidden = false
@@ -307,7 +401,7 @@ Every field is optional; omitted ones keep the catalogue default.
 
 - **Linux only.** It reads `/proc` and installs systemd user units; building it
   anywhere else fails at compile time rather than misbehaving at runtime.
-- **No packages.** No AUR, no crates.io, no release binaries. Build from source.
+- **Source installation.** The commands above build the checked-out source with Cargo.
 - **No agent API of its own.** TaiX runs whatever CLI you already have and reads
   its terminal. It does not talk to model providers, and it holds no API keys.
 - **One tmux server.** Everything shares the socket named in `tmux_socket`; kill
@@ -344,6 +438,18 @@ shell's — start `taix --gui` from a terminal to compare.
 install -Dm644 packaging/dev.taix.TaiX.desktop \
   ~/.local/share/applications/dev.taix.TaiX.desktop
 ```
+
+## Documentation
+
+See [CHANGELOG.md](CHANGELOG.md) for changes, including the web terminal,
+scheduled jobs, shell history, and headless deployment.
+
+## Publishing screenshots and diagnostics
+
+Before sharing a screenshot or diagnostic output, check for pairing links,
+terminal contents, personal paths, LAN addresses, and tailnet hostnames. Keep
+`web.key`, push credentials, local state, and crash dumps out of commits. A
+`.gitignore` rule does not remove a file or identifier from existing commits.
 
 ## Contributing
 

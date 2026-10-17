@@ -7,17 +7,21 @@
 //! callback does - by parking a request for the next frame. Nothing here
 //! touches tmux, and nothing here runs on the UI thread.
 //!
-//! Transport is Server-Sent Events down and `POST /cmd` up, not a
-//! WebSocket. A snapshot is a whole JSON picture published when it changes,
-//! which is exactly what SSE is: no handshake, no framing, no SHA-1, and a
-//! browser that reconnects by itself when a phone comes back from sleep.
-//! Upstream messages are keystroke-sized and go over a kept-alive
-//! connection, so the round trip on a LAN is a millisecond either way.
+//! Transport is one WebSocket per page (`/ws`): what that page has not seen
+//! of the picture down whenever it changes, commands up in order on the
+//! same connection.
+//! `POST /cmd` stays for the moments a socket cannot carry a message - the
+//! page being torn down (`sendBeacon`), or the gap before it reconnects.
 
 pub mod api;
+mod collab;
 pub mod html;
 mod http;
+mod passkey;
 pub mod proto;
+mod proxy;
+mod push;
+mod ws;
 
 /// One question from an out-of-process client, waiting for the GUI thread.
 #[derive(Debug, Clone)]
@@ -31,7 +35,7 @@ type Slot = Arc<(Mutex<Option<serde_json::Value>>, Condvar)>;
 
 /// Questions in flight at once. Past this a client is looping, not working.
 const MAX_ASKS: usize = 32;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -75,6 +79,10 @@ impl Server {
     /// to refuse to start.
     pub fn start(opts: Options) -> Server {
         let hub = Arc::new(Hub::new(opts.port, opts.key, opts.icons, opts.bind));
+        hub.passkeys
+            .open_at(taix_core::data_dir().join("passkeys.json"));
+        hub.collab
+            .open_at(taix_core::data_dir().join("devices.json"));
         let listener = hub.clone();
         std::thread::Builder::new()
             .name("taix-web".into())
@@ -166,33 +174,72 @@ pub struct Hub {
     health: Mutex<Health>,
     cmds: Mutex<VecDeque<Cmd>>,
     roots: Mutex<Vec<PathBuf>>,
+    /// Ports the panes' processes listen on, from the last snapshot: all
+    /// the preview proxy will connect to.
+    ports: Mutex<Vec<u16>>,
+    /// Each window's finished shell commands, as the GUI last handed them
+    /// over; `/api/history` reads it without waking the UI thread.
+    history: Mutex<Vec<(i64, Vec<taix_term::Command>)>>,
+    /// Per page: client id, windows, when it was last said.
     watch: Mutex<Vec<(String, Vec<i64>, Instant)>>,
     clients: AtomicUsize,
-    rev: AtomicU64,
     stop: AtomicBool,
     pending: Mutex<Vec<Waiting>>,
     /// Cookie-authenticated devices seen in the last hour: ip, agent, last.
     /// Pruned to the last hour on read; never wakes the UI thread (it is
     /// fed on every request). Capped at 32.
     ledger: Mutex<Vec<(String, String, Instant)>>,
+    /// Devices that must prove themselves to the phone's authenticator.
+    passkeys: passkey::Passkeys,
+    /// Share links, device names, claims and hand-offs.
+    collab: collab::Collab,
     waker: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     /// Ask/answer: connection threads park on their slot, the GUI thread
     /// drains the queue on tick and fills the slot when the page answers.
     ask_seq: AtomicU64,
     asks: Mutex<VecDeque<Ask>>,
     ask_pending: Mutex<HashMap<u64, Slot>>,
+    push: Arc<push::Push>,
 }
 
-/// The picture at one revision, in two forms: whole, for a browser that
-/// has just connected or fallen behind, and thin, for one that saw the
-/// revision before this - which is every browser, almost always.
+/// The snapshot without its screens, one serialised JSON value per
+/// top-level field. Sockets send a section only when it differs from the
+/// one that socket last sent.
+pub(crate) type Head = BTreeMap<String, String>;
+
+/// `{"name":json,...}` from sections that are already JSON.
+pub(crate) fn object<'a>(sections: impl Iterator<Item = (&'a str, &'a str)>) -> String {
+    let mut out = String::from("{");
+    for (i, (name, json)) in sections.enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        // Field names of `Snapshot`: plain identifiers, nothing to escape.
+        out.push('"');
+        out.push_str(name);
+        out.push_str("\":");
+        out.push_str(json);
+    }
+    out.push('}');
+    out
+}
+
+/// The picture at one revision. `head` is the snapshot without its screens,
+/// split into sections and serialised once here rather than once per page.
 #[derive(Default)]
 struct Frame {
+    /// Bumped by a publish that changed something, and by a page changing
+    /// what it watches: either way every socket has to look again.
     rev: u64,
-    json: Arc<str>,
-    thin: Option<Arc<str>>,
-    /// The HTML each pane was last published with, to know what to drop.
-    panes: Vec<(i64, String)>,
+    head: Arc<Head>,
+    snap: Option<Arc<Snapshot>>,
+}
+
+/// What a page's socket wakes up to.
+pub(crate) struct Wake {
+    pub rev: u64,
+    pub head: Arc<Head>,
+    pub snap: Option<Arc<Snapshot>>,
 }
 
 impl Hub {
@@ -226,65 +273,63 @@ impl Hub {
             }),
             cmds: Mutex::new(VecDeque::new()),
             roots: Mutex::new(Vec::new()),
+            ports: Mutex::new(Vec::new()),
+            history: Mutex::new(Vec::new()),
             watch: Mutex::new(Vec::new()),
             clients: AtomicUsize::new(0),
-            rev: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             pending: Mutex::new(Vec::new()),
             ledger: Mutex::new(Vec::new()),
+            passkeys: passkey::Passkeys::default(),
+            collab: collab::Collab::default(),
             waker: Mutex::new(None),
             ask_seq: AtomicU64::new(0),
             asks: Mutex::new(VecDeque::new()),
             ask_pending: Mutex::new(HashMap::new()),
+            push: Arc::new(push::Push::new(taix_core::data_dir())),
         }
     }
 
     /// Hand the current picture to every connected browser, if it differs
-    /// from the last one. The comparison is on the serialised form: it is a
-    /// `memcmp` against a string that has to be built anyway, and it is
-    /// what stops an idle session sending sixty identical frames a second.
-    ///
-    /// A pane's HTML is a whole screen, and a session usually has one pane
-    /// moving and the rest still, so the frame is published twice: whole,
-    /// and again without the screens that did not change.
+    /// from the last one. The screens are compared as they are and the rest
+    /// as its JSON, which has to be built for the pages anyway; an idle
+    /// session wakes nobody.
     pub fn publish(&self, mut snap: Snapshot) {
-        let rev = self.rev.load(Ordering::Relaxed) + 1;
-        snap.rev = rev;
-        snap.pane_ids = None;
+        *self.ports.lock() = snap
+            .projects
+            .iter()
+            .flat_map(|p| &p.windows)
+            .flat_map(|w| w.ports.iter().copied())
+            .collect();
+        snap.lock.holders = self.collab.holders(&snap.lock.remote);
+        let panes = std::mem::take(&mut snap.panes);
         let Ok(json) = serde_json::to_string(&snap) else {
             return;
         };
+        // Each top-level field keeps its exact text, so a page can be sent
+        // just the ones that moved.
+        let Ok(fields) =
+            serde_json::from_str::<BTreeMap<&str, &serde_json::value::RawValue>>(&json)
+        else {
+            return;
+        };
+        let head: Head = fields
+            .into_iter()
+            .map(|(name, json)| (name.to_string(), json.get().to_string()))
+            .collect();
+        snap.panes = panes;
         let mut frame = self.frame.lock();
-        if *frame.json == *json {
+        let moved = *frame.head != head;
+        if !moved && frame.snap.as_ref().is_some_and(|s| s.panes == snap.panes) {
             return;
         }
-        let mut panes = Vec::with_capacity(snap.panes.len());
-        let mut changed = Vec::new();
-        for pane in &snap.panes {
-            let pane_json = serde_json::to_string(pane).unwrap_or_default();
-            let same = frame
-                .panes
-                .iter()
-                .any(|(id, seen)| *id == pane.id && *seen == pane_json);
-            if !same {
-                changed.push(pane.clone());
-            }
-            panes.push((pane.id, pane_json));
+        frame.rev += 1;
+        // An unmoved head keeps its `Arc`, which is how a page knows it has
+        // nothing to compare.
+        if moved {
+            frame.head = Arc::new(head);
         }
-        let thin = if !changed.is_empty() && changed.len() < snap.panes.len() {
-            let pane_ids: Vec<i64> = snap.panes.iter().map(|p| p.id).collect();
-            let mut sparse = snap.clone();
-            sparse.panes = changed;
-            sparse.pane_ids = Some(pane_ids);
-            serde_json::to_string(&sparse).ok().map(Arc::from)
-        } else {
-            None
-        };
-        self.rev.store(rev, Ordering::Relaxed);
-        frame.rev = rev;
-        frame.json = Arc::from(json);
-        frame.thin = thin;
-        frame.panes = panes;
+        frame.snap = Some(Arc::new(snap));
         drop(frame);
         self.bell.notify_all();
     }
@@ -296,6 +341,18 @@ impl Hub {
 
     pub fn key(&self) -> String {
         self.key.lock().clone()
+    }
+
+    /// Web Push senders and subscriptions.
+    pub(crate) fn push(&self) -> &Arc<push::Push> {
+        &self.push
+    }
+
+    /// A window has stopped to ask for a human: tell the subscribed phones.
+    /// The caller is the desktop's own notification edge, which fires once
+    /// per transition, so there is nothing to debounce here.
+    pub fn alert(&self, window: i64, title: &str, body: &str, waiting: Option<usize>) {
+        self.push.alert(window, title, body, waiting);
     }
 
     /// Constant-time key comparison.
@@ -330,15 +387,47 @@ impl Hub {
         seen
     }
 
+    /// The windows one page said it is showing.
+    pub(crate) fn watching(&self, client: &str) -> Vec<i64> {
+        self.watch
+            .lock()
+            .iter()
+            .find(|(id, ..)| id == client)
+            .map(|(_, windows, _)| windows.clone())
+            .unwrap_or_default()
+    }
+
+    /// The one door for a browser's command: `origin` is who sent it, and
+    /// `collab` decides what, if anything, the desktop gets to see of it.
+    /// Everything a page or a link visitor sends comes through here.
+    pub(crate) fn command(&self, cmd: Cmd, origin: &collab::Origin) {
+        for cmd in self.collab.admit(cmd, origin) {
+            self.push_cmd(cmd);
+        }
+    }
+
     pub fn push_cmd(&self, cmd: Cmd) {
-        // A watch is bookkeeping for the capture loop, not an action: it
-        // must not wake the UI thread, and it must not queue up behind a
-        // frame.
+        // A watch is bookkeeping, not an action: it never wakes the UI
+        // thread, which captures what is watched on its own cadence.
         if let Cmd::Watch { client, windows } = cmd {
             let mut watch = self.watch.lock();
-            match watch.iter_mut().find(|(id, ..)| *id == client) {
-                Some(slot) => *slot = (client, windows, Instant::now()),
-                None => watch.push((client, windows, Instant::now())),
+            let moved = match watch.iter_mut().find(|(id, ..)| *id == client) {
+                Some(slot) => {
+                    let moved = slot.1 != windows;
+                    *slot = (client, windows, Instant::now());
+                    moved
+                }
+                None => {
+                    watch.push((client, windows, Instant::now()));
+                    true
+                }
+            };
+            drop(watch);
+            // The page's socket sends screens by this list: a pane it just
+            // switched to must not wait for something to print.
+            if moved {
+                self.frame.lock().rev += 1;
+                self.bell.notify_all();
             }
             return;
         }
@@ -377,6 +466,15 @@ impl Hub {
         *self.roots.lock() = roots;
     }
 
+    /// What the preview proxy may connect to.
+    pub(crate) fn ports(&self) -> Vec<u16> {
+        self.ports.lock().clone()
+    }
+
+    pub fn set_history(&self, history: Vec<(i64, Vec<taix_term::Command>)>) {
+        *self.history.lock() = history;
+    }
+
     /// Whether a path may be read or written through the web API: inside a
     /// project the user added, and free of `..`.
     pub fn allows(&self, path: &std::path::Path) -> bool {
@@ -402,29 +500,32 @@ impl Hub {
         self.icons
     }
 
-    /// Park until the picture is newer than `seen`, or the server stops.
-    /// Returns the frame to send, or `None` when it is time to hang up.
-    ///
-    /// A client that saw the revision immediately before this one can be
-    /// sent the thin frame; one that just connected, or that was writing
-    /// while two frames went by, needs the whole picture.
-    pub(crate) fn wait_frame(&self, seen: u64) -> Option<(u64, Arc<str>)> {
+    /// Park until the picture is newer than `seen`, the server stops, or
+    /// `IDLE_WAKE` passes - then the same `rev` comes back, and the caller
+    /// may send a keep-alive.
+    pub(crate) fn wait_frame(&self, seen: u64) -> Option<Wake> {
         let mut frame = self.frame.lock();
-        while frame.rev == seen && !self.stopping() {
-            if self.bell.wait_for(&mut frame, IDLE_WAKE).timed_out() && frame.rev == seen {
-                // Nothing new, and nothing wrong: let the caller send a
-                // keep-alive comment so an idle proxy does not hang up.
-                return Some((seen, Arc::from("")));
-            }
+        if frame.rev == seen && !self.stopping() {
+            self.bell.wait_for(&mut frame, IDLE_WAKE);
         }
         if self.stopping() {
             return None;
         }
-        let body = match &frame.thin {
-            Some(thin) if seen + 1 == frame.rev => thin,
-            _ => &frame.json,
-        };
-        Some((frame.rev, body.clone()))
+        Some(Wake {
+            rev: frame.rev,
+            head: frame.head.clone(),
+            snap: frame.snap.clone(),
+        })
+    }
+
+    /// The whole head as one JSON object, for a page's first paint; `None`
+    /// until the GUI has published anything.
+    pub(crate) fn head_json(&self) -> Option<String> {
+        let frame = self.frame.lock();
+        frame.snap.as_ref()?;
+        Some(object(
+            frame.head.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+        ))
     }
 
     pub(crate) fn joined(&self) {
@@ -580,6 +681,7 @@ impl Hub {
         }
         drop(ledger);
         self.deny(ip);
+        self.passkeys.forget_ip(ip);
         found.is_some()
     }
 
@@ -588,6 +690,8 @@ impl Hub {
         *self.key.lock() = key.to_string();
         self.pending.lock().clear();
         self.ledger.lock().clear();
+        self.passkeys.clear();
+        self.collab.revoke_all();
         let mut health = self.health.lock();
         let addr = match self.bind {
             Some(ip) => format!("{ip}:{}", self.port),
@@ -739,10 +843,6 @@ fn address(port: u16) -> String {
     }
 }
 
-/// The pairing URL with the key, shown to the user to open.
-pub fn pair_url(port: u16, key: &str) -> String {
-    format!("http://{}/?k={}", address(port), key)
-}
 /// The URL to open in a browser, or to show beside the indicator.
 pub fn url(port: u16) -> String {
     format!("http://{}", address(port))
@@ -752,20 +852,44 @@ pub fn url(port: u16) -> String {
 mod tests {
     use super::*;
 
-    fn pane(id: i64, html: &str) -> proto::PaneView {
+    /// A screen of `text`'s lines; one that starts with `*` is bold.
+    fn screen(text: &str) -> html::Screen {
+        use taix_term::{Chunk, Style};
+        html::screen(|sink| {
+            for (i, line) in text.split('\n').enumerate() {
+                if i > 0 {
+                    sink(Chunk::LineBreak);
+                }
+                let (line, bold) = match line.strip_prefix('*') {
+                    Some(rest) => (rest, true),
+                    None => (line, false),
+                };
+                if !line.is_empty() {
+                    sink(Chunk::Text(
+                        line,
+                        Style {
+                            bold,
+                            ..Style::default()
+                        },
+                    ));
+                }
+            }
+        })
+    }
+    pub(crate) fn pane(id: i64, text: &str) -> proto::PaneView {
         proto::PaneView {
             id,
             cols: 80,
             rows: 24,
             scroll: 0,
             mouse: false,
-            html: Some(html.to_string()),
+            alt: false,
+            screen: screen(text),
         }
     }
-    fn snap(panes: Vec<proto::PaneView>) -> Snapshot {
+    pub(crate) fn snap(panes: Vec<proto::PaneView>) -> Snapshot {
         Snapshot {
-            rev: 0,
-            lock: proto::LockView { remote: Vec::new() },
+            lock: proto::LockView::default(),
             host: "test".into(),
             session: proto::SessionView {
                 uptime: 0,
@@ -776,7 +900,6 @@ mod tests {
             selected: None,
             focus: None,
             zoomed: None,
-            pane_ids: None,
             panes,
             bar: Vec::new(),
             harnesses: Vec::new(),
@@ -793,109 +916,202 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_pane_that_did_not_change_is_left_out_of_the_next_frame() {
-        let hub = Hub::detached();
-        hub.publish(snap(vec![pane(1, "one"), pane(2, "two")]));
-        let (first, whole) = hub.wait_frame(0).unwrap();
-        assert!(whole.contains("one") && whole.contains("two"), "{whole}");
+    fn next(hub: &Hub, page: &mut ws::Page) -> Option<serde_json::Value> {
+        let wake = hub.wait_frame(0).unwrap();
+        page.update(
+            &wake.head,
+            wake.snap.as_deref().unwrap(),
+            &hub.watching("c"),
+        )
+        .map(|text| serde_json::from_str(&text).unwrap())
+    }
 
-        hub.publish(snap(vec![pane(1, "one"), pane(2, "moved")]));
-        let (_, thin) = hub.wait_frame(first).unwrap();
-        assert!(thin.contains("moved"), "{thin}");
-        assert!(!thin.contains("one"), "unchanged pane resent: {thin}");
-
-        // A browser that has just connected has seen nothing, so it cannot
-        // fill the gap from a previous frame and must get every screen.
-        let (_, fresh) = hub.wait_frame(0).unwrap();
-        assert!(fresh.contains("one") && fresh.contains("moved"), "{fresh}");
+    fn watch(hub: &Hub, windows: Vec<i64>) {
+        hub.push_cmd(Cmd::Watch {
+            client: "c".into(),
+            windows,
+        })
     }
 
     #[test]
-    fn sparse_frame_merge_reproduces_full_snapshot() {
+    fn a_page_is_sent_only_the_rows_that_moved_of_the_panes_it_shows() {
         let hub = Hub::detached();
-        // Publish initial full snapshot with 3 panes
-        let full1 = snap(vec![pane(1, "one"), pane(2, "two"), pane(3, "three")]);
-        hub.publish(full1.clone());
-        let (_rev1, frame1) = hub.wait_frame(0).unwrap();
+        let mut page = ws::Page::default();
+        let next = |page: &mut ws::Page| next(&hub, page);
+        let watch = |windows| watch(&hub, windows);
 
-        // Update only pane 2, publish sparse frame
-        let updated = snap(vec![
-            pane(1, "one"),
-            pane(2, "two-updated"),
-            pane(3, "three"),
-        ]);
-        hub.publish(updated.clone());
-        let (_rev2, frame2) = hub.wait_frame(_rev1).unwrap();
-
-        // Parse both frames
-        let full_snap: Snapshot = serde_json::from_str(&frame1).unwrap();
-        let sparse_snap: Snapshot = serde_json::from_str(&frame2).unwrap();
-
-        // Verify sparse frame has pane_ids and only changed pane
+        hub.publish(snap(vec![pane(1, "a\nb"), pane(2, "secret")]));
+        watch(vec![1]);
+        let first = next(&mut page).unwrap();
+        assert_eq!(first["head"]["host"], "test");
+        assert_eq!(
+            first["panes"][0]["lines"],
+            serde_json::json!([["a"], ["b"]])
+        );
+        assert_eq!(first["panes"][0]["alt"], false);
         assert!(
-            sparse_snap.pane_ids.is_some(),
-            "sparse frame should have pane_ids"
+            first.get("styles").is_none(),
+            "plain text needs none: {first}"
         );
+        assert!(!first.to_string().contains("secret"), "{first}");
+        assert!(next(&mut page).is_none(), "nothing moved, nothing sent");
+
+        hub.publish(snap(vec![pane(1, "a\nB"), pane(2, "secret")]));
+        let moved = next(&mut page).unwrap();
+        assert!(moved.get("head").is_none(), "{moved}");
+        assert_eq!(moved["panes"][0]["edit"], serde_json::json!([[1, ["B"]]]));
+        assert_eq!(moved["panes"][0]["n"], 2);
+        assert!(moved["panes"][0].get("shift").is_none(), "{moved}");
+
+        // A resize that happens not to change a row still has to arrive.
+        let mut wide = pane(1, "a\nB");
+        wide.cols = 120;
+        hub.publish(snap(vec![wide, pane(2, "secret")]));
+        let resized = next(&mut page).unwrap();
+        assert_eq!(resized["panes"][0]["cols"], 120);
+        assert!(resized["panes"][0].get("edit").is_none(), "{resized}");
+
+        // So does a program entering the alternate screen.
+        let mut vim = pane(1, "a\nB");
+        vim.cols = 120;
+        vim.alt = true;
+        hub.publish(snap(vec![vim, pane(2, "secret")]));
+        assert_eq!(next(&mut page).unwrap()["panes"][0]["alt"], true);
+
+        // A pane that stops being watched is forgotten, so coming back to it
+        // starts from the whole screen rather than from rows the page may
+        // have dropped.
+        watch(vec![2]);
         assert_eq!(
-            sparse_snap.panes.len(),
-            1,
-            "sparse frame should only have changed pane"
+            next(&mut page).unwrap()["panes"][0]["lines"],
+            serde_json::json!([["secret"]])
         );
-        assert_eq!(sparse_snap.panes[0].id, 2);
-
-        // Apply the merge logic (mirrors JS: merge changed panes into held state)
-        let held: std::collections::HashMap<i64, proto::PaneView> =
-            full_snap.panes.iter().map(|p| (p.id, p.clone())).collect();
-        let incoming: std::collections::HashMap<i64, proto::PaneView> = sparse_snap
-            .panes
-            .iter()
-            .map(|p| (p.id, p.clone()))
-            .collect();
-        let merged: Vec<proto::PaneView> = sparse_snap
-            .pane_ids
-            .as_ref()
-            .unwrap()
-            .iter()
-            .filter_map(|id| incoming.get(id).or_else(|| held.get(id)).cloned())
-            .collect();
-
-        // Verify merge reproduces the full updated snapshot
-        assert_eq!(merged.len(), 3, "merged should have all 3 panes");
-        assert_eq!(merged[0].html.as_ref().unwrap(), "one");
-        assert_eq!(merged[1].html.as_ref().unwrap(), "two-updated");
-        assert_eq!(merged[2].html.as_ref().unwrap(), "three");
+        watch(vec![1]);
+        assert_eq!(
+            next(&mut page).unwrap()["panes"][0]["lines"],
+            serde_json::json!([["a"], ["B"]])
+        );
     }
 
     #[test]
-    fn pane_with_changed_non_html_field_appears_in_sparse_frame() {
+    fn only_the_head_sections_that_moved_are_sent_and_a_vanished_one_is_null() {
         let hub = Hub::detached();
-        // Publish initial snapshot with 2 panes
-        let snap1 = snap(vec![pane(1, "output"), pane(2, "other")]);
-        hub.publish(snap1);
-        let (rev1, _frame1) = hub.wait_frame(0).unwrap();
+        let mut page = ws::Page::default();
+        watch(&hub, vec![1]);
 
-        // Update pane 1 with same html but different cols (simulating resize)
-        // Keep pane 2 unchanged
-        let mut p1 = pane(1, "output");
-        p1.cols = 120; // changed from 80
-        let snap2 = snap(vec![p1, pane(2, "other")]);
-        hub.publish(snap2);
-        let (_rev2, frame2) = hub.wait_frame(rev1).unwrap();
+        hub.publish(snap(vec![pane(1, "a")]));
+        let first = next(&hub, &mut page).unwrap();
+        let sections = first["head"].as_object().unwrap();
+        for name in [
+            "lock", "host", "session", "projects", "bar", "palette", "health",
+        ] {
+            assert!(sections.contains_key(name), "{name} missing: {first}");
+        }
+        assert!(!sections.contains_key("panes"), "{first}");
 
-        // Parse sparse frame
-        let sparse: Snapshot = serde_json::from_str(&frame2).unwrap();
+        let mut said = snap(vec![pane(1, "a")]);
+        said.status = "building".into();
+        hub.publish(said);
+        let moved = next(&hub, &mut page).unwrap();
+        assert_eq!(moved["head"], serde_json::json!({"status": "building"}));
+        assert_eq!(moved["panes"], serde_json::json!([]));
 
-        // Even though html is unchanged, pane 1 should be in the sparse frame
-        // because cols changed, but pane 2 should not be included
-        assert!(sparse.pane_ids.is_some(), "should be a sparse frame");
+        hub.publish(snap(vec![pane(1, "a")]));
         assert_eq!(
-            sparse.panes.len(),
-            1,
-            "only changed pane should be in sparse frame"
+            next(&hub, &mut page).unwrap()["head"],
+            serde_json::json!({"status": null})
         );
-        assert_eq!(sparse.panes[0].id, 1, "changed pane should be pane 1");
-        assert_eq!(sparse.panes[0].cols, 120, "updated cols should be present");
+        assert!(next(&hub, &mut page).is_none());
+
+        // The boot page gets the same sections whole, `</` and `<!` aside.
+        let boot: serde_json::Value = serde_json::from_str(&hub.head_json().unwrap()).unwrap();
+        assert_eq!(boot["host"], "test");
+        assert!(boot.get("status").is_none(), "{boot}");
+    }
+
+    /// A page applies a pane message by the contract's own rules: drop
+    /// `shift` rows from the top, pad or cut to `n` with empty rows, then
+    /// overwrite the `edit` ones. Whatever it ends up holding must be the
+    /// screen that was published, whichever way the server chose to say it.
+    #[test]
+    fn scrolled_screens_arrive_as_a_shift_and_edits_that_rebuild_them() {
+        use serde_json::{Value, json};
+        let hub = Hub::detached();
+        let mut page = ws::Page::default();
+        watch(&hub, vec![1]);
+        let mut styles = HashMap::new();
+        let mut held: Vec<Value> = Vec::new();
+
+        // Every third line is bold, by its own number, so a line keeps its
+        // look wherever it lands.
+        let lines = |from: usize, count: usize| {
+            (from..from + count)
+                .map(|n| format!("{}line {n} of the build output", ["*", "", ""][n % 3]))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let mut step = |text: String, want: Option<u64>, edits: usize| {
+            hub.publish(snap(vec![pane(1, &text)]));
+            let msg = next(&hub, &mut page).unwrap();
+            for style in msg["styles"].as_array().into_iter().flatten() {
+                styles.insert(
+                    style[0].as_u64().unwrap(),
+                    style[1].as_str().unwrap().to_string(),
+                );
+            }
+            let pane = &msg["panes"][0];
+            if let Some(whole) = pane.get("lines") {
+                held = whole.as_array().unwrap().clone();
+            } else {
+                let shift = pane.get("shift").and_then(Value::as_u64);
+                assert_eq!(shift, want, "{pane}");
+                held.drain(..(shift.unwrap_or(0) as usize).min(held.len()));
+                held.resize(pane["n"].as_u64().unwrap() as usize, json!([]));
+                for edit in pane
+                    .get("edit")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    held[edit[0].as_u64().unwrap() as usize] = edit[1].clone();
+                }
+                let sent = pane
+                    .get("edit")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len);
+                assert_eq!(sent, edits, "{pane}");
+            }
+            let html = held
+                .iter()
+                .map(|row| {
+                    row.as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|run| match run {
+                            Value::String(text) => format!("<span>{text}</span>"),
+                            run => format!(
+                                "<span{}>{}</span>",
+                                styles[&run[0].as_u64().unwrap()],
+                                run[1].as_str().unwrap()
+                            ),
+                        })
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(html, screen(&text).to_html());
+        };
+
+        step(lines(0, 24), None, 0);
+        // Scrolled up three lines: three new rows at the bottom.
+        step(lines(3, 24), Some(3), 3);
+        // One row changed: a shift would cost more than the one edit.
+        step(lines(3, 24) + "!", None, 1);
+        // Scrolled and shorter: the page cuts what it has, nothing to edit.
+        step(lines(5, 17), Some(2), 0);
+        // Scrolled and taller: rows past what the page holds are padding
+        // until edited.
+        step(lines(10, 30), Some(5), 18);
     }
 
     #[test]

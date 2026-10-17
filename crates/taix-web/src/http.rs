@@ -1,4 +1,4 @@
-//! Enough HTTP/1.1 to serve one page, one event stream and a POST.
+//! Enough HTTP/1.1 to serve one page, one WebSocket and a POST.
 //!
 //! Hand-written because the whole contract is: parse a request line and a
 //! `Content-Length`, write a header block, keep the socket alive. A
@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
+use crate::collab::{self, Origin};
 use crate::{Hub, proto};
 
 /// Assets are embedded, not read from disk: the GUI is one binary that a
@@ -51,6 +52,83 @@ const ASSETS: &[Asset] = assets![
     ("/js/term.js", JS, "js/term.js"),
     ("/js/compose.js", JS, "js/compose.js"),
     ("/js/panels.js", JS, "js/panels.js"),
+    ("/js/history.js", JS, "js/history.js"),
+    ("/js/lock.js", JS, "js/lock.js"),
+    ("/js/hosts.js", JS, "js/hosts.js"),
+    ("/js/preview.js", JS, "js/preview.js"),
+    ("/viewer.html", HTML, "viewer.html"),
+    ("/js/viewer.js", JS, "js/viewer.js"),
+    ("/js/collab.js", JS, "js/collab.js"),
+    ("/js/age.js", JS, "js/age.js"),
+    ("/js/hints.js", JS, "js/hints.js"),
+];
+
+/// One PNG under `assets/`, served at the same path.
+macro_rules! png {
+    ($file:literal) => {
+        (
+            concat!("/", $file),
+            "image/png",
+            include_bytes!(concat!("../assets/", $file)),
+        )
+    };
+}
+
+/// The app's own icons and launch screens: binary, so not in `ASSETS`, and
+/// public - the manifest and the home screen ask for them without the cookie.
+const IMAGES: &[(&str, &str, &[u8])] = &[
+    (
+        "/icon.svg",
+        "image/svg+xml",
+        include_bytes!("../assets/icon.svg"),
+    ),
+    (
+        "/icon-192.png",
+        "image/png",
+        include_bytes!("../assets/icon-192.png"),
+    ),
+    (
+        "/icon-512.png",
+        "image/png",
+        include_bytes!("../assets/icon-512.png"),
+    ),
+    (
+        "/icon-maskable.png",
+        "image/png",
+        include_bytes!("../assets/icon-maskable.png"),
+    ),
+    (
+        "/apple-touch-icon.png",
+        "image/png",
+        include_bytes!("../assets/apple-touch-icon.png"),
+    ),
+    // One launch screen per iPhone screen size, and per iPad size and
+    // orientation, named by physical pixels; `index.html` picks between
+    // them by media query.
+    png!("splash/750x1334.png"),
+    png!("splash/828x1792.png"),
+    png!("splash/1125x2436.png"),
+    png!("splash/1170x2532.png"),
+    png!("splash/1179x2556.png"),
+    png!("splash/1206x2622.png"),
+    png!("splash/1242x2688.png"),
+    png!("splash/1284x2778.png"),
+    png!("splash/1290x2796.png"),
+    png!("splash/1320x2868.png"),
+    png!("splash/1488x2266.png"),
+    png!("splash/2266x1488.png"),
+    png!("splash/1620x2160.png"),
+    png!("splash/2160x1620.png"),
+    png!("splash/1640x2360.png"),
+    png!("splash/2360x1640.png"),
+    png!("splash/1668x2388.png"),
+    png!("splash/2388x1668.png"),
+    png!("splash/1668x2420.png"),
+    png!("splash/2420x1668.png"),
+    png!("splash/2048x2732.png"),
+    png!("splash/2732x2048.png"),
+    png!("splash/2064x2752.png"),
+    png!("splash/2752x2064.png"),
 ];
 
 const PAIR_PAGE: &str = r#"<!doctype html>
@@ -143,6 +221,13 @@ pub struct Req {
     pub if_none_match: String,
     pub peer: String,
     pub agent: String,
+    /// `Sec-WebSocket-Key`, on an upgrade request only.
+    pub ws_key: String,
+    /// `Host`, which is the WebAuthn relying party and what an origin is
+    /// checked against.
+    pub host: String,
+    /// The request as sent, for the preview proxy to forward.
+    pub raw: crate::proxy::Raw,
 }
 
 impl Req {
@@ -235,10 +320,48 @@ fn asset(index: usize, req: &Req) -> Reply {
     }
 }
 
+/// The app's page with the head of the picture inlined, so the first paint
+/// does not wait for the socket to open and answer. Different on every
+/// load, so it has no `etag`; gzipped here, the prebuilt copy having no
+/// head in it.
+fn boot(req: &Req, head: &str) -> Reply {
+    let index = ASSETS.iter().position(|a| a.0 == "/").unwrap_or_default();
+    let (_, kind, plain, _) = ASSETS[index];
+    // In a script block `</` ends it early and `<!` can open a comment:
+    // JSON spells either character another way, so none of it is markup.
+    let head = head.replace("</", "<\\/").replace("<!", "<\\u0021");
+    let page = plain.replacen(
+        "<!--boot-->",
+        &format!("<script id=\"boot\" type=\"application/json\">{head}</script>"),
+        1,
+    );
+    let zipped = req
+        .accept_encoding
+        .contains("gzip")
+        .then(|| gzip(page.as_bytes()))
+        .flatten();
+    let mut headers = Vec::new();
+    if zipped.is_some() {
+        headers.push(("content-encoding", "gzip".to_string()));
+    }
+    Reply {
+        status: 200,
+        kind,
+        body: zipped.unwrap_or_else(|| page.into_bytes()),
+        headers,
+    }
+}
+
+fn gzip(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gz.write_all(bytes).ok()?;
+    gz.finish().ok()
+}
+
 /// Platform and browser out of a user-agent, for the line the desktop
 /// shows beside the address. Edge and Opera are checked before Safari
 /// because every one of them claims to be Safari.
-fn device(agent: &str) -> String {
+pub(crate) fn device(agent: &str) -> String {
     let os = [
         "iPhone",
         "iPad",
@@ -294,22 +417,128 @@ pub fn serve(stream: TcpStream, hub: &Arc<Hub>) {
     };
     let mut reader = BufReader::new(stream);
     while let Some(req) = parse(&mut reader, &peer) {
-        if req.method == "GET" && req.path == "/events" {
+        // A share link's live page: no cookie, only the token. Before the
+        // paired `/ws` below, and it never reaches the pairing check.
+        if req.method == "GET"
+            && let Some(token) = req
+                .path
+                .strip_prefix("/s/")
+                .and_then(|p| p.strip_suffix("/ws"))
+        {
+            let Some((window, _)) = hub.collab.view(token) else {
+                let _ = write_reply(&mut writer, &Reply::fail(404, "this link has ended"));
+                return;
+            };
+            if req.ws_key.is_empty() {
+                let _ = write_reply(
+                    &mut writer,
+                    &Reply::fail(400, "expected a websocket upgrade"),
+                );
+                return;
+            }
+            let _ = reader.get_ref().set_read_timeout(None);
+            let origin = Origin::Viewer {
+                token: token.to_string(),
+                window,
+            };
+            crate::ws::session(reader, writer, &req, "", "", origin, "", hub);
+            return;
+        }
+        if req.method == "GET" && req.path == "/ws" {
+            if foreign_origin(&req) {
+                let _ = write_reply(&mut writer, &Reply::fail(403, "cross-origin"));
+                return;
+            }
             if !hub.check_auth(cookie(&req)) {
                 let _ = write_reply(&mut writer, &Reply::fail(401, "unpaired"));
                 return;
             }
-            // The stream is meant to be silent for minutes at a time; the
+            if req.ws_key.is_empty() {
+                let _ = write_reply(
+                    &mut writer,
+                    &Reply::fail(400, "expected a websocket upgrade"),
+                );
+                return;
+            }
+            let dev = crate::passkey::device(&req);
+            if hub.passkeys.locked(dev, &req.peer) {
+                let _ = write_reply(&mut writer, &Reply::fail(423, "locked"));
+                return;
+            }
+            hub.record_device(&req.peer, &device(&req.agent));
+            // The socket is meant to be silent for minutes at a time; the
             // idle timeout is for a request that never arrives.
             let _ = reader.get_ref().set_read_timeout(None);
-            events(&mut writer, hub);
+            let origin = Origin::Device(collab::clean_id(req.arg("d")));
+            let client = collab::clean_id(req.arg("c"));
+            let label = collab::nickname(&req.agent);
+            crate::ws::session(reader, writer, &req, dev, &client, origin, &label, hub);
             return;
+        }
+        if let Some(hit) = crate::proxy::hit(&req.raw) {
+            use crate::proxy::{self, Gate};
+            let cookie_ok = hub.check_auth(cookie(&req));
+            let gate = proxy::admit(
+                hit,
+                cookie_ok,
+                crate::passkey::device(&req),
+                &hub.key(),
+                &hub.ports(),
+                |dev| hub.passkeys.locked(dev, &req.peer),
+            );
+            let reply = match gate {
+                Gate::Skip => None,
+                Gate::Reply(reply) => Some(reply),
+                Gate::Proxy(route) => {
+                    if cookie_ok {
+                        hub.record_device(&req.peer, &device(&req.agent));
+                    }
+                    if req.raw.is_upgrade() {
+                        // Like the page's own socket: silent for minutes.
+                        let _ = reader.get_ref().set_read_timeout(None);
+                        if let Err(reply) =
+                            proxy::tunnel(&req.method, &req.raw, &route, &mut reader, &writer)
+                        {
+                            let _ = write_reply(&mut writer, &reply);
+                        }
+                        return;
+                    }
+                    match proxy::forward(&req.method, &req.raw, &req.body, &route, &mut writer) {
+                        Ok(true) => continue,
+                        Ok(false) => return,
+                        Err(reply) => Some(reply),
+                    }
+                }
+            };
+            if let Some(reply) = reply {
+                if write_reply(&mut writer, &reply).is_err() {
+                    return;
+                }
+                continue;
+            }
+        }
+        if foreign_origin(&req) && !matches!(req.method.as_str(), "GET" | "HEAD") {
+            if write_reply(&mut writer, &Reply::fail(403, "cross-origin")).is_err() {
+                return;
+            }
+            continue;
         }
         let reply = route(&req, hub);
         if write_reply(&mut writer, &reply).is_err() {
             return;
         }
     }
+}
+
+/// A browser names the page a request came from in `Origin`. One that is not
+/// this host's is somebody else's page - a previewed dev server (whose
+/// `Origin` is `null`: the proxy sandboxes it), another site - and may not
+/// write, or open the socket that does. A client that sends none (the CLI,
+/// a navigation) is not a page.
+fn foreign_origin(req: &Req) -> bool {
+    req.raw
+        .header("origin")
+        .is_some_and(|origin| !crate::passkey::origin_ok(origin, &req.host))
 }
 
 /// Everything but the pairing handshake needs the cookie. An unpaired GET
@@ -320,12 +549,15 @@ fn route(req: &Req, hub: &Arc<Hub>) -> Reply {
         status: 200,
         kind: "text/html; charset=utf-8",
         body: PAIR_PAGE.as_bytes().to_vec(),
-        headers: Vec::new(),
+        // Answers any path for an unpaired device: the service worker must
+        // not keep it as the offline copy of `/` or of a script.
+        headers: vec![("x-taix-pair", "1".into())],
     };
     let authed = hub.check_auth(cookie(req));
     if authed {
         hub.record_device(&req.peer, &device(&req.agent));
     }
+    let locked = authed && hub.passkeys.locked(crate::passkey::device(req), &req.peer);
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/") if hub.check_auth(req.arg("k")) => Reply::paired(&hub.key()),
         ("POST", "/pair") => {
@@ -354,6 +586,30 @@ fn route(req: &Req, hub: &Arc<Hub>) -> Reply {
                 ),
             )
         }
+        // What makes the page installable, before the cookie check: a
+        // browser fetches the manifest without credentials, and got the
+        // pairing page instead - so TaiX was never installable at all.
+        // None of it says anything about the session.
+        ("GET", path @ ("/manifest.webmanifest" | "/sw.js")) => {
+            let i = ASSETS.iter().position(|a| a.0 == path).unwrap_or_default();
+            let mut reply = asset(i, req);
+            if path == "/sw.js" {
+                reply.headers.push(("service-worker-allowed", "/".into()));
+            }
+            reply
+        }
+        ("GET", path) if let Some((_, kind, bytes)) = IMAGES.iter().find(|i| i.0 == path) => {
+            Reply {
+                status: 200,
+                kind,
+                body: bytes.to_vec(),
+                // Changes with a rebuild at most, and a launcher asks often.
+                headers: vec![("cache-control", "max-age=86400".into())],
+            }
+        }
+        // A share link: the token is the credential, and nothing here sets
+        // the pairing cookie. The only route that answers before the check.
+        ("GET", path) if path.starts_with("/s/") => visit(req, hub),
         _ if !authed => {
             if req.method == "GET" {
                 if hub.approved(&req.peer) {
@@ -366,24 +622,31 @@ fn route(req: &Req, hub: &Arc<Hub>) -> Reply {
                 Reply::fail(401, "unpaired")
             }
         }
+        (_, path) if path.starts_with("/passkey/") => crate::passkey::route(req, hub, locked),
+        // A locked device may still load the page, so it can draw its lock
+        // screen; anything that touches a session waits for the passkey.
+        (method, path)
+            if locked
+                && !(method == "GET"
+                    && (path == "/health"
+                        || path.starts_with("/icons/")
+                        || ASSETS.iter().any(|a| a.0 == path))) =>
+        {
+            Reply::fail(423, "locked")
+        }
         ("GET", "/health") => Reply::json(
             200,
             serde_json::to_string(&hub.health()).unwrap_or_default(),
         ),
         ("POST", "/cmd") => match serde_json::from_slice::<proto::Cmd>(&req.body) {
             Ok(cmd) => {
-                hub.push_cmd(cmd);
+                hub.command(cmd, &Origin::Device(collab::clean_id(req.arg("d"))));
                 Reply::json(200, "{\"ok\":true}".into())
             }
             Err(e) => Reply::fail(400, &e.to_string()),
         },
-        ("GET", path) if let Some(i) = ASSETS.iter().position(|a| a.0 == path) => {
-            let mut reply = asset(i, req);
-            if path == "/sw.js" {
-                reply.headers.push(("service-worker-allowed", "/".into()));
-            }
-            reply
-        }
+        ("GET", "/") if !locked && let Some(head) = hub.head_json() => boot(req, &head),
+        ("GET", path) if let Some(i) = ASSETS.iter().position(|a| a.0 == path) => asset(i, req),
         ("GET", path) if let Some(name) = path.strip_prefix("/icons/") => {
             let name = name.trim_end_matches(".svg");
             match hub.icons().iter().find(|(id, _)| *id == name) {
@@ -397,7 +660,53 @@ fn route(req: &Req, hub: &Arc<Hub>) -> Reply {
             }
         }
         ("GET", path) | ("POST", path) if path.starts_with("/api/") => crate::api::route(req, hub),
+        (_, path) if path.starts_with("/collab/") => collab::route(req, hub),
+        ("GET", path) | ("POST", path) if path.starts_with("/push/") => {
+            crate::push::route(req, hub)
+        }
         _ => Reply::fail(404, "not found"),
+    }
+}
+
+const LINK_GONE: &str = "<!doctype html><meta charset=utf-8>\
+<meta name=viewport content=\"width=device-width,initial-scale=1\">\
+<body style=\"background:#0b0f12;color:#a8b1b8;font:16px sans-serif;display:grid;place-items:center;height:100vh\">\
+<p>This link has expired or was revoked.</p>";
+
+/// `/s/<token>[/...]`: the read-only page for one shared window and the two
+/// assets it needs. The token is the whole credential, and this never sets
+/// the pairing cookie - a visitor gets a page, not a place in the house.
+/// The live part is the WebSocket at `/s/<token>/ws`, answered in `serve`.
+fn visit(req: &Req, hub: &Hub) -> Reply {
+    let rest = req.path.strip_prefix("/s/").unwrap_or_default();
+    let (token, tail) = rest.split_once('/').unwrap_or((rest, ""));
+    if hub.collab.view(token).is_none() {
+        return Reply {
+            status: 404,
+            kind: HTML,
+            body: LINK_GONE.as_bytes().to_vec(),
+            headers: Vec::new(),
+        };
+    }
+    // Relative asset URLs in the page resolve under the token only with the
+    // trailing slash.
+    if !rest.contains('/') {
+        return Reply {
+            status: 302,
+            kind: "text/plain",
+            body: Vec::new(),
+            headers: vec![("location", format!("/s/{token}/"))],
+        };
+    }
+    let name = match tail {
+        "" => "/viewer.html",
+        "style.css" => "/style.css",
+        "js/viewer.js" => "/js/viewer.js",
+        _ => return Reply::fail(404, "not found"),
+    };
+    match ASSETS.iter().position(|a| a.0 == name) {
+        Some(i) => asset(i, req),
+        None => Reply::fail(404, "not found"),
     }
 }
 
@@ -437,41 +746,13 @@ fn reason(status: u16) -> &'static str {
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
+        423 => "Locked",
+        307 => "Temporary Redirect",
         404 => "Not Found",
         500 => "Internal Server Error",
+        502 => "Bad Gateway",
         _ => "OK",
     }
-}
-
-/// The snapshot stream. One thread parks here per watching browser, woken
-/// by `Hub::publish`; the timed wake-up sends a comment so a phone's radio
-/// and any proxy in between keep the connection.
-fn events(w: &mut TcpStream, hub: &Arc<Hub>) {
-    let head = "HTTP/1.1 200 OK\r\n\
-                content-type: text/event-stream\r\n\
-                cache-control: no-store\r\n\
-                connection: keep-alive\r\n\
-                x-accel-buffering: no\r\n\r\n";
-    if w.write_all(head.as_bytes()).is_err() {
-        return;
-    }
-    // No read timeout while streaming: the socket is write-only from here,
-    // and the thread's life is the connection's.
-    let _ = w.set_write_timeout(Some(READ_TIMEOUT));
-    hub.joined();
-    let mut seen = 0;
-    while let Some((rev, json)) = hub.wait_frame(seen) {
-        let wrote = if json.is_empty() {
-            w.write_all(b": ping\n\n")
-        } else {
-            seen = rev;
-            w.write_all(format!("event: state\ndata: {json}\n\n").as_bytes())
-        };
-        if wrote.and_then(|()| w.flush()).is_err() {
-            break;
-        }
-    }
-    hub.left();
 }
 
 /// Read one request. `None` ends the connection: a closed socket, a
@@ -494,6 +775,9 @@ fn parse<R: Read>(reader: &mut BufReader<R>, peer: &str) -> Option<Req> {
     let mut accept_encoding = String::new();
     let mut if_none_match = String::new();
     let mut agent = String::new();
+    let mut ws_key = String::new();
+    let mut host = String::new();
+    let mut raw_headers = Vec::new();
     let mut header_count = 0;
     let mut header_bytes = 0;
     loop {
@@ -520,6 +804,7 @@ fn parse<R: Read>(reader: &mut BufReader<R>, peer: &str) -> Option<Req> {
             return None;
         }
         if let Some((name, value)) = header.split_once(':') {
+            raw_headers.push((name.to_string(), value.trim().to_string()));
             let name_lower = name.to_ascii_lowercase();
             if name_lower == "content-length" {
                 length = value.trim().parse().ok()?;
@@ -535,6 +820,10 @@ fn parse<R: Read>(reader: &mut BufReader<R>, peer: &str) -> Option<Req> {
                 if_none_match = value.trim().to_string();
             } else if name_lower == "user-agent" {
                 agent = value.trim().to_string();
+            } else if name_lower == "host" {
+                host = value.trim().to_string();
+            } else if name_lower == "sec-websocket-key" {
+                ws_key = value.trim().to_string();
             }
         }
     }
@@ -586,6 +875,12 @@ fn parse<R: Read>(reader: &mut BufReader<R>, peer: &str) -> Option<Req> {
         if_none_match,
         peer: peer.to_string(),
         agent,
+        ws_key,
+        host,
+        raw: crate::proxy::Raw {
+            target,
+            headers: raw_headers,
+        },
     })
 }
 
@@ -655,6 +950,41 @@ mod tests {
             if_none_match: String::new(),
             peer: String::new(),
             agent: String::new(),
+            ws_key: String::new(),
+            raw: Default::default(),
+            host: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_page_carries_the_head_inline_and_the_head_cannot_end_the_script() {
+        let head = r#"{"host":"</script><!--<script>","n":1}"#;
+        let mut accepts_gzip = req("GET", "/", &[], "");
+        accepts_gzip.accept_encoding = "gzip".into();
+        for (request, zipped) in [(req("GET", "/", &[], ""), false), (accepts_gzip, true)] {
+            let reply = boot(&request, head);
+            assert_eq!(reply.status, 200);
+            let encoded = reply
+                .headers
+                .iter()
+                .any(|(name, _)| *name == "content-encoding");
+            assert_eq!(encoded, zipped);
+            let body = if zipped {
+                let mut out = String::new();
+                flate2::read::GzDecoder::new(&reply.body[..])
+                    .read_to_string(&mut out)
+                    .unwrap();
+                out
+            } else {
+                String::from_utf8(reply.body).unwrap()
+            };
+            assert!(body.contains("<html") && !body.contains("<!--boot-->"));
+            let open = r#"<script id="boot" type="application/json">"#;
+            let start = body.find(open).expect("the marker is replaced") + open.len();
+            let inner = &body[start..start + body[start..].find("</script>").unwrap()];
+            assert!(!inner.contains("</") && !inner.contains("<!"), "{inner}");
+            let parsed: serde_json::Value = serde_json::from_str(inner).unwrap();
+            assert_eq!(parsed["host"], "</script><!--<script>");
         }
     }
 
@@ -665,6 +995,27 @@ mod tests {
         let unpaired = route(&req("GET", "/", &[], ""), &hub);
         assert_eq!(unpaired.status, 200);
         assert!(String::from_utf8_lossy(&unpaired.body).contains("Pair with TaiX"));
+        // The service worker keys on this to never store it as the app.
+        assert!(
+            unpaired
+                .headers
+                .iter()
+                .any(|(name, _)| *name == "x-taix-pair")
+        );
+        // Browsers fetch these without the cookie; the pairing page in their
+        // place makes the app uninstallable.
+        for path in [
+            "/manifest.webmanifest",
+            "/sw.js",
+            "/icon-192.png",
+            "/splash/750x1334.png",
+        ] {
+            let reply = route(&req("GET", path, &[], ""), &hub);
+            assert!(
+                !reply.headers.iter().any(|(name, _)| *name == "x-taix-pair"),
+                "{path}"
+            );
+        }
         assert_eq!(route(&req("POST", "/cmd", &[], ""), &hub).status, 401);
         assert_eq!(
             route(&req("GET", "/js/app.js", &[], "taix=nope"), &hub).status,
@@ -693,6 +1044,48 @@ mod tests {
         let app = route(&req("GET", "/", &[], &format!("taix={key}")), &hub);
         assert!(String::from_utf8_lossy(&app.body).contains("<html"));
         assert!(!String::from_utf8_lossy(&app.body).contains("Pair with TaiX"));
+    }
+
+    /// A device with a passkey that has not unlocked gets the shell and the
+    /// passkey routes, and a 423 for everything that touches a session.
+    #[test]
+    fn locked_device_reaches_only_the_shell_and_passkey_routes() {
+        let hub = Arc::new(Hub::detached());
+        let id = "AAAAAAAAAAAAAAAAAAAAAA";
+        let file =
+            std::env::temp_dir().join(format!("taix-passkeys-gate-{}.json", std::process::id()));
+        std::fs::write(
+            &file,
+            format!(r#"[{{"id":"{id}","rp":"localhost","cred":"c","key":"k","count":0}}]"#),
+        )
+        .unwrap();
+        hub.passkeys.open_at(file.clone());
+        let _ = std::fs::remove_file(&file);
+        let ask = |method, path| {
+            let mut r = req(method, path, &[], &format!("taix={}", hub.key()));
+            r.cookies.insert("taix-dev".into(), id.into());
+            route(&r, &hub).status
+        };
+        for (method, path) in [
+            ("POST", "/cmd"),
+            ("GET", "/api/files"),
+            ("POST", "/api/file"),
+            ("POST", "/passkey/remove"),
+        ] {
+            assert_eq!(ask(method, path), 423, "{path}");
+        }
+        for (method, path) in [
+            ("GET", "/"),
+            ("GET", "/js/lock.js"),
+            ("GET", "/style.css"),
+            ("GET", "/health"),
+            ("GET", "/passkey/state"),
+        ] {
+            assert_eq!(ask(method, path), 200, "{path}");
+        }
+        // Another device on the same pairing key is not this device.
+        let other = req("POST", "/cmd", &[], &format!("taix={}", hub.key()));
+        assert_ne!(route(&other, &hub).status, 423);
     }
 
     /// A request as the listener builds it for a device with no cookie.
@@ -842,5 +1235,33 @@ mod tests {
         phone.cookies.insert("taix".into(), key.clone());
         let reply = route(&phone, &hub);
         assert!(String::from_utf8_lossy(&reply.body).contains(r#""state":"paired""#));
+    }
+
+    #[test]
+    fn a_share_link_opens_one_page_without_pairing_the_visitor() {
+        let hub = Arc::new(Hub::detached());
+        let token = hub.collab.share(3, Duration::from_secs(60)).unwrap();
+        let visit = |path: &str| {
+            let mut r = req("GET", path, &[], "");
+            r.peer = "10.0.0.9".into();
+            route(&r, &hub)
+        };
+
+        let page = visit(&format!("/s/{token}/"));
+        assert_eq!(page.status, 200);
+        assert!(String::from_utf8_lossy(&page.body).contains("Read-only"));
+        assert!(page.headers.iter().all(|(n, _)| *n != "set-cookie"));
+        assert_eq!(visit(&format!("/s/{token}/style.css")).status, 200);
+        assert_eq!(visit(&format!("/s/{token}")).status, 302);
+        // Nothing else of the house is reachable on a link: not a paired
+        // asset, and the API still answers with the pairing page.
+        assert_eq!(visit(&format!("/s/{token}/js/store.js")).status, 404);
+        assert!(String::from_utf8_lossy(&visit("/api/files").body).contains("Pair with TaiX"));
+
+        assert_eq!(visit("/s/0000000000000000/").status, 404);
+        assert!(hub.collab.revoke(&token));
+        let gone = visit(&format!("/s/{token}/"));
+        assert_eq!(gone.status, 404);
+        assert!(gone.headers.iter().all(|(n, _)| *n != "set-cookie"));
     }
 }

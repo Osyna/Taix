@@ -42,8 +42,6 @@ const TICK: Duration = Duration::from_millis(50);
 /// the poll at once either way; only the first chunk of output after a
 /// silence waits this long, and after it the loop is back at `TICK`.
 const IDLE_TICK: Duration = Duration::from_millis(250);
-/// tmux keeps the history, so the emulator does not. Costs ~1.9 MB per pane.
-const HISTORY_LIMIT: usize = 2_000;
 
 /// RAII guard that restores the terminal on drop, even on panic.
 struct TerminalGuard;
@@ -77,7 +75,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let store = Store::open(&Config::store_path())?;
     cmd::ensure_session(&cfg.tmux_socket, &cfg.tmux_session, 240, 60)?;
     let client = Client::attach(&cfg.tmux_socket, &cfg.tmux_session)?;
-    if let Err(e) = cmd::set_history_limit(&client, HISTORY_LIMIT) {
+    if let Err(e) = cmd::set_history_limit(&client, cfg.history_limit) {
         taix_core::trace!("set_history_limit failed: {e}");
     }
 

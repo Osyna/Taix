@@ -274,12 +274,20 @@ impl App {
                 continue;
             }
             row.agent.state = state;
+            row.state_since = super::epoch_secs();
             row.card.update(
                 &row.agent,
                 &self.cfg,
                 tint(&self.cfg, &row.agent).as_deref(),
             );
             updates.push((row.agent.id, state));
+            if row.agent.kind != taix_core::terminal().id {
+                match state {
+                    AgentState::Waiting => self.jobs.fire(taix_core::jobs::Trigger::AgentWaiting),
+                    AgentState::Idle => self.jobs.fire(taix_core::jobs::Trigger::AgentIdle),
+                    _ => {}
+                }
+            }
             if state.needs_attention() && row.notified_state != Some(state) {
                 alerts.push((
                     row.agent.id,
@@ -324,6 +332,29 @@ impl App {
             .is_some_and(|r| self.muted.contains(&r.agent.project))
         {
             return;
+        }
+        // The phone's lock screen is told on the same edge, for the same
+        // reason, and is muted by the same switch.
+        if let Some(hub) = self.web.hub() {
+            let project = self
+                .row(id)
+                .and_then(|r| self.project(r.agent.project))
+                .map_or("", |p| p.name.as_str());
+            hub.alert(
+                id,
+                &match state {
+                    AgentState::Waiting => format!("{name} is waiting"),
+                    AgentState::Failed => format!("{name} failed"),
+                    other => format!("{name} is {}", other.as_str()),
+                },
+                project,
+                (state == AgentState::Waiting).then(|| {
+                    self.rows
+                        .iter()
+                        .filter(|r| r.agent.state == AgentState::Waiting)
+                        .count()
+                }),
+            );
         }
         let notif = gtk::gio::Notification::new(&match state {
             AgentState::Waiting => format!("{name} needs input"),

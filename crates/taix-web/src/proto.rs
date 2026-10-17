@@ -1,9 +1,9 @@
 //! The wire: one snapshot down, one command up.
 //!
-//! Both directions are JSON, because the other end is a browser. The
-//! snapshot is a whole picture rather than a diff - it is a few KB, it is
-//! only sent when it changed, and a client that reconnects is instantly
-//! right instead of replaying a log it missed.
+//! Both directions are JSON, because the other end is a browser. The GUI
+//! publishes a whole [`Snapshot`]; each page's socket then sends only what
+//! that page has not seen: the sections of the snapshot that moved, and the
+//! rows that changed of the panes the page is showing.
 
 use serde::{Deserialize, Serialize};
 
@@ -90,6 +90,10 @@ pub struct WindowView {
     pub tint: Option<String>,
     /// `starting` | `working` | `waiting` | `done` | `failed` | `idle`.
     pub state: String,
+    /// Epoch seconds when `state` last changed (or the desktop first saw the
+    /// window); the page turns it into "busy for 4m" on its own clock.
+    #[serde(default)]
+    pub since: u64,
     /// Has a pane. A window without one shows its "click to start" mark.
     pub alive: bool,
     /// Wants looking at: the state the desktop would notify for.
@@ -110,6 +114,9 @@ pub struct WindowView {
     /// Browser runs headless (no desktop window).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub headless: bool,
+    /// TCP ports its processes listen on: what the preview can open.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -121,9 +128,9 @@ pub struct ProjectView {
     pub windows: Vec<WindowView>,
 }
 
-/// One pane's screen, already rendered. The browser gets HTML rather than
-/// cells and a palette: the grid is built once here, where the emulator
-/// already is, instead of in JavaScript on a phone.
+/// One pane's screen, already rendered. The browser gets rows of styled
+/// runs rather than cells and a palette: the grid is built once here,
+/// where the emulator already is, instead of in JavaScript on a phone.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaneView {
     pub id: i64,
@@ -134,11 +141,13 @@ pub struct PaneView {
     /// True when a program in the pane asked for the mouse, so a tap must
     /// go to it rather than move a text cursor.
     pub mouse: bool,
-    /// Absent when this pane is unchanged since the frame the client last
-    /// saw, which is most of them: only the pane being typed into moves,
-    /// and its neighbours cost a full screen of HTML each to repeat.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub html: Option<String>,
+    /// A full-screen program (vim, an agent's TUI) is on the alternate
+    /// screen: the page must not echo what is typed, the program draws it.
+    pub alt: bool,
+    /// The screen, one row per line of the grid. Never part of the
+    /// snapshot's JSON: each socket encodes the rows itself.
+    #[serde(skip)]
+    pub screen: crate::html::Screen,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -156,13 +165,9 @@ pub struct BarItem {
     pub text: String,
 }
 
-/// Everything a client draws from. Sent whole, only when it differs from
-/// the last one published.
+/// Everything a client draws from, as the GUI last published it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
-    /// Bumped by the hub, not the GUI; clients use it to drop duplicates.
-    #[serde(default)]
-    pub rev: u64,
     pub lock: LockView,
     pub host: String,
     pub session: SessionView,
@@ -173,11 +178,9 @@ pub struct Snapshot {
     pub focus: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub zoomed: Option<i64>,
-    /// When present, this is a sparse frame: `panes` contains only changed
-    /// panes, and this roster lets the client detect removals. When absent,
-    /// `panes` is complete and the client replaces its held state.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pane_ids: Option<Vec<i64>>,
+    /// The screens of the windows some page is looking at. Never sent as
+    /// part of the snapshot: each page gets its own rows of these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub panes: Vec<PaneView>,
     pub bar: Vec<BarItem>,
     pub harnesses: Vec<HarnessView>,
@@ -198,10 +201,23 @@ pub struct Snapshot {
 /// desktop keeps working in another, in another project. A window is
 /// claimed by tapping it on the page, and given back by clicking it on the
 /// desktop - the same gesture on both sides, and never a mode.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LockView {
     /// Window ids a browser holds. Empty means the desktop has everything.
     pub remote: Vec<i64>,
+    /// Which device holds each of those, where the hub knows. Filled in by
+    /// the hub on publish, not by the GUI.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holders: Vec<Holder>,
+}
+
+/// A browser that claimed a window, by the id its page keeps and the name
+/// its owner gave it ("iPad", "Chrome on Linux").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Holder {
+    pub window: i64,
+    pub device: String,
+    pub name: String,
 }
 
 impl PartialEq for Health {
@@ -273,6 +289,12 @@ pub enum Cmd {
     },
     ScrollBottom {
         window: i64,
+    },
+    /// Scroll to the previous (`delta < 0`) or next prompt of a shell that
+    /// sends OSC 133 marks; past the last one, back to the live bottom.
+    Prompt {
+        window: i64,
+        delta: i32,
     },
     /// The grid this browser is drawing the terminal at.
     ///
@@ -363,6 +385,11 @@ pub enum Cmd {
     },
     Mute {
         project: i64,
+    },
+    /// Fold or unfold a project's window list, on every screen at once.
+    Fold {
+        project: i64,
+        folded: bool,
     },
     Merge {
         window: i64,

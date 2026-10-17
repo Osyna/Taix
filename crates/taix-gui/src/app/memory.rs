@@ -14,36 +14,33 @@ impl App {
             return;
         }
         self.last_mem = Instant::now();
-        // Skip the memory walk when nothing consumes it: the perf popover is
-        // closed, memory is not in the bar, and no web client is watching.
+        // PSS is the expensive read (`smaps_rollup` per process), so it is
+        // skipped when nothing consumes it: the perf popover is closed,
+        // memory is not in the bar, and no web client is watching. The tree
+        // itself is ~30 small reads and always wanted, for the ports.
         let need_mem = self.w.perf.is_open()
             || self.cfg.bar.iter().any(|s| s == "memory")
             || self.web.clients() > 0;
-        let table = if need_mem {
-            let roots: Vec<u32> = self
-                .server
-                .as_ref()
-                .map(|(pid, _)| *pid)
-                .into_iter()
-                .chain(panes.iter().map(|p| p.pid))
-                .collect();
-            Some(taix_core::mem::ProcTable::read(&roots))
-        } else {
-            None
-        };
+        let roots: Vec<u32> = self
+            .server
+            .as_ref()
+            .map(|(pid, _)| *pid)
+            .into_iter()
+            .chain(panes.iter().map(|p| p.pid))
+            .collect();
+        let table = taix_core::mem::ProcTable::read(&roots);
         // Before anything that needs tmux: a shell job does not, and a
         // hiccup there must not stall the scheduler.
         if self.jobs.tick() {
             self.reload();
         }
-        if let Some(table) = &table {
-            self.measure(panes, table);
+        if need_mem {
+            self.measure(panes, &table);
         }
         self.flush_logs();
         self.reap_dead_panes(panes);
-        if let Some(table) = &table {
-            self.adopt_running_harnesses(panes, table);
-        }
+        self.adopt_running_harnesses(panes, &table);
+        self.scan_procs(panes, table);
         self.reap_idle();
         // One `stat` per open directory, so a file an agent just wrote
         // appears without anyone pressing refresh.
@@ -193,5 +190,113 @@ impl App {
                 uptime: self.launched.elapsed(),
             },
         );
+    }
+
+    /// Which windows serve which ports: every pane header, sidebar row and
+    /// project, the bar's segment, and the process monitor if it is open.
+    fn scan_procs(&mut self, panes: &[PaneInfo], table: taix_core::mem::ProcTable) {
+        let pane_pids: Vec<u32> = panes.iter().map(|p| p.pid).collect();
+        // Pane descendants only: on a kernel without `children` the table is
+        // the whole machine, and its fds are not ours to walk.
+        self.ports.update(&table.descendants(&pane_pids));
+        for row in &mut self.rows {
+            row.pid = row
+                .agent
+                .pane
+                .and_then(|pane| panes.iter().find(|p| p.id == pane))
+                .map(|p| p.pid);
+            let tree = row
+                .pid
+                .map_or_else(Vec::new, |pid| table.descendants(&[pid]));
+            let addrs: Vec<std::net::SocketAddr> = tree
+                .iter()
+                .flat_map(|&pid| self.ports.of(pid).iter().copied())
+                .collect();
+            row.procs = (
+                taix_core::procs::ports(&addrs),
+                tree.len().saturating_sub(1),
+            );
+        }
+        let mut served: Vec<u16> = self
+            .rows
+            .iter()
+            .flat_map(|r| r.procs.0.iter().copied())
+            .collect();
+        served.sort_unstable();
+        served.dedup();
+        self.jobs.ports(&served);
+        self.table = table;
+        self.paint_procs();
+        if let Some(scope) = self.w.procs.open_scope() {
+            self.refresh_procs(scope);
+        }
+    }
+
+    /// Put the last reading on every anchor: pane headers, sidebar rows and
+    /// projects, and the bar.
+    pub(super) fn paint_procs(&self) {
+        let merge = |rows: &mut dyn Iterator<Item = &Row>| {
+            let (mut ports, mut procs) = (Vec::new(), 0);
+            for row in rows {
+                ports.extend_from_slice(&row.procs.0);
+                procs += row.procs.1;
+            }
+            ports.sort_unstable();
+            ports.dedup();
+            (ports, procs)
+        };
+        for row in &self.rows {
+            row.card.set_procs(&row.procs.0, row.procs.1);
+        }
+        for card in &self.sidebar {
+            let (ports, procs) =
+                merge(&mut self.rows.iter().filter(|r| r.agent.project == card.project));
+            crate::procs::chip(&card.procs, &ports, procs);
+            for chip in &card.windows {
+                if let Some(row) = self.rows.iter().find(|r| r.agent.id == chip.id) {
+                    crate::procs::chip(&chip.procs, &row.procs.0, row.procs.1);
+                }
+            }
+        }
+        let (ports, procs) = merge(&mut self.rows.iter());
+        self.w.procs.set_summary(&ports, procs);
+    }
+
+    /// Fill the process monitor from the last reading. `&self` for the same
+    /// reason as `refresh_perf`: it runs from a hover handler.
+    pub fn refresh_procs(&self, scope: crate::procs::Scope) {
+        use crate::procs::Scope;
+        let windows: Vec<crate::procs::Window> = self
+            .projects
+            .iter()
+            .flat_map(|project| {
+                self.rows
+                    .iter()
+                    .filter(move |r| r.agent.project == project.id)
+                    .map(move |r| (project, r))
+            })
+            .filter(|(_, r)| match scope {
+                Scope::All => true,
+                Scope::Project(id) => r.agent.project == id,
+                Scope::Window(id) => r.agent.id == id,
+            })
+            .filter_map(|(project, r)| {
+                let procs = taix_core::procs::tree(r.pid?, &self.table)
+                    .into_iter()
+                    .map(|p| {
+                        let addrs = self.ports.of(p.pid).to_vec();
+                        (p, addrs)
+                    })
+                    .collect();
+                Some(crate::procs::Window {
+                    id: r.agent.id,
+                    name: r.agent.name.clone(),
+                    project: project.name.clone(),
+                    selected: self.selected == Some(project.id),
+                    procs,
+                })
+            })
+            .collect();
+        self.w.procs.set(scope, &windows);
     }
 }

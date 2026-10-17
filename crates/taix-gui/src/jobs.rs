@@ -39,7 +39,7 @@ const BACKGROUND_SUB: &str = "Running jobs while no TaiX window is open";
 
 /// What the "When" row offers, and what each means. `Custom…` is the escape
 /// hatch: it leaves the expression alone.
-const PRESETS: [(&str, &str); 8] = [
+const PRESETS: [(&str, &str); 10] = [
     ("Every 5 minutes", "@every 5m"),
     ("Every 15 minutes", "@every 15m"),
     ("Hourly", "@hourly"),
@@ -47,12 +47,16 @@ const PRESETS: [(&str, &str); 8] = [
     ("Daily at 09:00", "0 9 * * *"),
     ("Weekly, Monday 09:00", "0 9 * * 1"),
     ("Monthly, the 1st at 09:00", "0 9 1 * *"),
+    ("When an agent is waiting", "on agent-waiting"),
+    ("When an agent goes idle", "on agent-idle"),
     ("Custom…", ""),
 ];
 
 const SCHEDULE_HELP: &str = "minute hour day month weekday — each field takes *, */n, a-b \
                              or a,b. Numbers only: no month or day names. Shorthands: \
-                             @hourly, @daily, @weekly, @monthly, @every 15m.";
+                             @hourly, @daily, @weekly, @monthly, @every 15m. Or an event: \
+                             on agent-waiting, on agent-idle, on port-up:3000, \
+                             on job-done:<id>, on job-failed:<id>.";
 
 const ACTIONS: [(&str, Action); 4] = [
     ("Run a command", Action::Shell),
@@ -423,6 +427,7 @@ fn meta_line(job: &Job) -> String {
     let now = core::now();
     let mut out = match core::parse(&job.schedule) {
         Err(e) => return format!("{} · {e}", job.schedule),
+        Ok(core::Schedule::On(_)) => job.schedule.clone(),
         Ok(schedule) => {
             let next = schedule
                 .next_after(job.last_run.unwrap_or(job.created))
@@ -1050,6 +1055,7 @@ fn schedule_hint(expr: &str) -> String {
     let now = core::now();
     match core::parse(expr) {
         Err(e) => e,
+        Ok(core::Schedule::On(on)) => format!("runs when {on}"),
         Ok(schedule) => {
             let runs: Vec<String> = schedule
                 .next_runs(now, 3)

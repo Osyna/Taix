@@ -284,6 +284,7 @@ mod tests {
             isolate: false,
             bar: vec![],
             reap_idle_after_ms: None,
+            history_limit: 10_000,
             web: crate::config::Web {
                 enabled: true,
                 port: 4040,

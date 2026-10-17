@@ -432,11 +432,28 @@ fn web_group(ed: &Rc<Editor>, cfg: &Config, bridge: &crate::web::Bridge) -> gtk:
         .css_classes(["set-row-sub"])
         .build();
     let serve_switch = gtk::Switch::builder().valign(gtk::Align::Center).build();
+    // Start from what `tailscale serve` is doing, not from "off": the dialog
+    // is opened far more often than the switch is flipped.
+    serve_switch.set_active(taix_core::tailscale::serve_url().is_some());
     serve_switch.connect_active_notify({
-        let (serve_sub, cfg) = (serve_sub.clone(), cfg.web.port);
+        let (serve_sub, draft) = (serve_sub.clone(), ed.draft.clone());
         move |s| {
+            // `paint` and the revert below set the switch from reality; only
+            // a click that disagrees with it is a request.
+            if s.is_active() == taix_core::tailscale::serve_url().is_some() {
+                return;
+            }
             let result = if s.is_active() {
-                taix_core::tailscale::serve_on(cfg)
+                // Read at the click, not when the dialog was built: the port
+                // and "Tailscale only" may have changed since.
+                let web = draft.borrow().web.clone();
+                let host = match web.tailscale {
+                    true => taix_core::tailscale::status()
+                        .and_then(|t| t.ip)
+                        .map(|ip| ip.to_string()),
+                    false => None,
+                };
+                taix_core::tailscale::serve_on(host.as_deref().unwrap_or("127.0.0.1"), web.port)
             } else {
                 taix_core::tailscale::serve_off()
             };
@@ -451,6 +468,39 @@ fn web_group(ed: &Rc<Editor>, cfg: &Config, bridge: &crate::web::Bridge) -> gtk:
         Some(&serve_sub),
         &serve_switch,
     ));
+
+    // What a phone should open: the HTTPS address when `tailscale serve` is
+    // up (only that gives it an installable app, push and passkeys), else the
+    // LAN one. `paint` fills these in.
+    let link_sub = gtk::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .selectable(true)
+        .css_classes(["set-row-sub", "mono"])
+        .build();
+    let link = Rc::new(RefCell::new(String::new()));
+    // `can_shrink` would let the row hand it its minimum, which is zero.
+    let qr = gtk::Picture::builder()
+        .halign(gtk::Align::Center)
+        .can_shrink(false)
+        .build();
+    let copy_link = gtk::Button::builder()
+        .label("Copy link")
+        .css_classes(["flat"])
+        .build();
+    copy_link.connect_clicked({
+        let (link, toasts) = (link.clone(), ed.toasts.clone());
+        move |b| {
+            if let Some(window) = b.root().and_downcast::<adw::ApplicationWindow>() {
+                window.clipboard().set_text(&link.borrow());
+                toasts.add_toast(adw::Toast::new("copied"));
+            }
+        }
+    });
+    let pair_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    pair_box.append(&qr);
+    pair_box.append(&copy_link);
+    group.append(&kit::row_live("Pair a phone", Some(&link_sub), &pair_box));
 
     let status = gtk::Label::builder()
         .xalign(0.0)
@@ -544,12 +594,31 @@ fn web_group(ed: &Rc<Editor>, cfg: &Config, bridge: &crate::web::Bridge) -> gtk:
             bridge.devices.clone(),
             bridge.forget.clone(),
         );
+        let (link_sub, link, qr, pair_box) =
+            (link_sub.clone(), link.clone(), qr.clone(), pair_box.clone());
         let last_ips = Rc::new(RefCell::new(Vec::<String>::new()));
         move || {
             let now = health();
             let tailnet = taix_core::tailscale::status();
             let running = tailnet.as_ref().filter(|t| t.state == "Running");
             let serve_url = taix_core::tailscale::serve_url();
+            // Not live means no key to hand out, and a stale QR is worse than none.
+            pair_box.set_visible(now.life == Life::Live);
+            if now.life == Life::Live {
+                let (primary, plain) = pair_links(serve_url.as_deref(), &now.url);
+                let text = match &plain {
+                    Some(plain) => format!("{primary}\nor {plain}"),
+                    None => primary.clone(),
+                };
+                if link_sub.text() != text {
+                    link_sub.set_text(&text);
+                    qr.set_paintable(qr_texture(&primary).as_ref());
+                    *link.borrow_mut() = primary;
+                }
+            } else {
+                link_sub.set_text("off - turn the web server on above");
+                link.borrow_mut().clear();
+            }
             status.set_text(&match now.life {
                 Life::Off => "stopped".to_string(),
                 Life::Starting => format!("binding port {}", now.port),
@@ -656,6 +725,52 @@ fn web_group(ed: &Rc<Editor>, cfg: &Config, bridge: &crate::web::Bridge) -> gtk:
         }
     });
     group
+}
+
+/// The link a phone should open, then the plain-HTTP one as the fallback.
+/// Only HTTPS gives a phone an installable app, push and passkeys, so the
+/// `tailscale serve` address leads whenever there is one; `plain` is the
+/// server's own pairing link and is where the key is read from.
+fn pair_links(serve: Option<&str>, plain: &str) -> (String, Option<String>) {
+    match (serve, plain.split_once("?k=")) {
+        (Some(base), Some((_, key))) => (
+            format!("{}/?k={key}", base.trim_end_matches('/')),
+            Some(plain.to_string()),
+        ),
+        _ => (plain.to_string(), None),
+    }
+}
+
+/// `text` as RGBA pixels of a QR code, `scale` pixels per module, with the
+/// four-module quiet zone the spec asks for. Black on white whatever the
+/// theme: a scanner needs the contrast, not the palette. Returns the side
+/// in pixels.
+fn qr_rgba(text: &str, scale: usize) -> Option<(usize, Vec<u8>)> {
+    use qrcodegen::{QrCode, QrCodeEcc};
+    let qr = QrCode::encode_text(text, QrCodeEcc::Medium).ok()?;
+    let side = (qr.size() as usize + 8) * scale;
+    let mut px = vec![255u8; side * side * 4];
+    for y in 0..side {
+        for x in 0..side {
+            if qr.get_module((x / scale) as i32 - 4, (y / scale) as i32 - 4) {
+                px[(y * side + x) * 4..][..3].fill(0);
+            }
+        }
+    }
+    Some((side, px))
+}
+
+/// The pairing QR as a texture, 5px per module: a whole-number scale keeps
+/// the edges sharp, and a version-5 code lands near 250px.
+fn qr_texture(text: &str) -> Option<gtk::gdk::MemoryTexture> {
+    let (side, px) = qr_rgba(text, 5)?;
+    Some(gtk::gdk::MemoryTexture::new(
+        side as i32,
+        side as i32,
+        gtk::gdk::MemoryFormat::R8g8b8a8,
+        &glib::Bytes::from_owned(px),
+        side * 4,
+    ))
 }
 
 /// What a coding agent needs to reach this window: the stdio command to
@@ -1397,5 +1512,33 @@ mod tests {
         );
         assert_eq!(short_path("/etc/taix.toml", None), "/etc/taix.toml");
         assert_eq!(short_path("/etc/taix.toml", Some("")), "/etc/taix.toml");
+    }
+
+    #[test]
+    fn https_leads_and_carries_the_lan_key() {
+        let plain = "http://192.168.1.5:4040/?k=abc123";
+        assert_eq!(
+            pair_links(Some("https://box.ts.net"), plain),
+            (
+                "https://box.ts.net/?k=abc123".to_string(),
+                Some(plain.to_string())
+            )
+        );
+        assert_eq!(pair_links(None, plain), (plain.to_string(), None));
+        // No key to carry: nothing sensible to put on the https address.
+        assert_eq!(
+            pair_links(Some("https://box.ts.net"), "http://x:1"),
+            ("http://x:1".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn qr_has_a_white_quiet_zone_and_dark_modules() {
+        let (side, px) = qr_rgba("https://box.ts.net/?k=0123456789abcdef01234567", 4).unwrap();
+        assert_eq!(px.len(), side * side * 4);
+        let at = |x: usize, y: usize| px[(y * side + x) * 4];
+        // Four modules of margin on every edge, then the finder pattern's corner.
+        assert!((0..side).all(|i| at(i, 0) == 255 && at(0, i) == 255));
+        assert_eq!(at(16, 16), 0);
     }
 }

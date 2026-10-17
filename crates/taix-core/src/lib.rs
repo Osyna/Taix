@@ -10,6 +10,7 @@ pub mod history;
 pub mod jobs;
 pub mod log;
 pub mod mem;
+pub mod procs;
 mod project_config;
 pub mod session;
 pub mod spawn;
@@ -23,7 +24,7 @@ pub mod text;
 pub mod trace;
 mod watcher;
 
-pub use config::{AgentKind, Config, random_key, set_web_key, web_key};
+pub use config::{AgentKind, Config, data_dir, random_key, set_web_key, web_key};
 pub use harness::{
     BROWSER, Entry, Harness, TERMINAL, adopt_shell_path, available, browser, by_id, catalog,
     entries, next_name, running_harnesses, shell_path, terminal, which,

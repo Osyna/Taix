@@ -81,14 +81,17 @@ pub fn serve_url() -> Option<String> {
     result
 }
 
-pub fn serve_on(port: u16) -> Result<(), String> {
+/// Proxy `https://<name>.ts.net` to the web server at `host:port` - the
+/// address it is bound to, which is the tailnet IP in "Tailscale only" mode,
+/// where nothing answers on 127.0.0.1.
+pub fn serve_on(host: &str, port: u16) -> Result<(), String> {
     crate::which("tailscale").ok_or("tailscale not found")?;
     let output = std::process::Command::new("tailscale")
         .args([
             "serve",
             "--bg",
             "--https=443",
-            &format!("http://127.0.0.1:{port}"),
+            &format!("http://{host}:{port}"),
         ])
         .output()
         .map_err(|e| e.to_string())?;

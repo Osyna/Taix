@@ -486,6 +486,7 @@ fn cli_jobs(args: &[String]) -> ExitCode {
         Some("log") => jobs_log(&store, &cfg, &args[1..]),
         Some("history") => jobs_history(&store, &args[1..]),
         Some("run-due") => jobs_run_due(&store, &cfg),
+        Some("fire") => jobs_fire(&store, &cfg, args.get(1)),
         Some("install") => match taix_core::jobs::background_install() {
             Ok(warning) => {
                 println!("jobs will run every minute while you are logged in");
@@ -531,9 +532,12 @@ fn jobs_help() {
          \x20 taix jobs log <id|name> [-n <lines>]       what it printed (default 200)\n\
          \x20 taix jobs history [<id|name>] [-n <runs>]  run history (default all jobs, 20 runs)\n\
          \x20 taix jobs run-due                          run whatever is due; the timer's verb\n\
+         \x20 taix jobs fire <event>                     run the jobs waiting for it; the fronts' verb\n\
          \x20 taix jobs install | uninstall              run jobs with TaiX closed\n\n\
          Adding one:\n\
          \x20 --at <when>        `@hourly`, `@daily`, `@every 15m`, cron fields, or `YYYY-MM-DD HH:MM`\n\
+         \x20 --on <event>       instead of a clock: `agent-waiting`, `agent-idle`, `port-up:<port>`,\n\
+         \x20                    `job-done:<id>` (after that job succeeds) or `job-failed:<id>`\n\
          \x20 --run <command>    run it in a shell\n\
          \x20 --agent <harness>  open that agent (needs --project)\n\
          \x20 --ask <prompt>     ... and type this into it\n\
@@ -619,6 +623,7 @@ fn jobs_list(store: &Store) -> ExitCode {
         let next = match taix_core::jobs::parse(&job.schedule) {
             Err(e) => format!("bad schedule: {e}"),
             Ok(_) if !job.enabled => "off".to_string(),
+            Ok(taix_core::jobs::Schedule::On(_)) => "on event".to_string(),
             Ok(schedule) => schedule
                 .next_after(job.last_run.unwrap_or(job.created))
                 .map_or("no upcoming run".to_string(), |t| {
@@ -669,6 +674,7 @@ fn jobs_add(store: &Store, args: &[String]) -> ExitCode {
         };
         let taken = match arg.as_str() {
             "--at" | "--when" => value().map(|v| schedule = Some(v)),
+            "--on" => value().map(|v| schedule = Some(format!("on {v}"))),
             "--run" | "--command" => value().map(|v| command = Some(v)),
             "--agent" => value().map(|v| harness = Some(v)),
             "--ask" | "--prompt" => value().map(|v| prompt = Some(v)),
@@ -792,7 +798,15 @@ fn jobs_add(store: &Store, args: &[String]) -> ExitCode {
         .into_iter()
         .map(|t| taix_core::jobs::format_local(t, now))
         .collect();
-    println!("[{}] {name} runs {}", job.id, upcoming.join(", then "));
+    if upcoming.is_empty() {
+        println!(
+            "[{}] {name} runs when {}",
+            job.id,
+            schedule.trim_start_matches("on ")
+        );
+    } else {
+        println!("[{}] {name} runs {}", job.id, upcoming.join(", then "));
+    }
     if taix_core::jobs::background_status() != taix_core::jobs::Background::Enabled {
         println!("note: jobs only run while a TaiX window is open; `taix jobs install` fixes that");
     }
@@ -888,6 +902,26 @@ fn jobs_run_due(store: &Store, cfg: &Config) -> ExitCode {
         println!("{outcome}");
     }
     ExitCode::SUCCESS
+}
+
+/// What a front calls when something happened: `taix jobs fire port-up:3000`.
+fn jobs_fire(store: &Store, cfg: &Config, event: Option<&String>) -> ExitCode {
+    match event.map(|e| e.parse::<taix_core::jobs::Trigger>()) {
+        Some(Ok(on)) => {
+            for outcome in taix_core::jobs::fire(store, cfg, on) {
+                println!("{outcome}");
+            }
+            ExitCode::SUCCESS
+        }
+        Some(Err(e)) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+        None => {
+            eprintln!("usage: taix jobs fire <trigger>");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// `taix -t [-s <id>] [-l <layout>]`: the project as a tmux session in this

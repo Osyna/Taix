@@ -90,6 +90,14 @@ pub struct Run {
     pub error: Option<String>,
 }
 
+impl Run {
+    /// Did it end well? No exit code is fine (an agent or git run has
+    /// none); an error or a non-zero exit is not.
+    pub fn ok(&self) -> bool {
+        self.error.is_none() && self.exit.is_none_or(|c| c == 0)
+    }
+}
+
 /// When a finished job is worth a desktop notification. Failure by default:
 /// a job you asked for silently is one you only want to hear about when it
 /// did not happen.
@@ -745,6 +753,26 @@ impl Store {
                 }
             }
             Ok(due)
+        })
+    }
+
+    /// Take every enabled job waiting for `on`, stamping `last_run` in the
+    /// same locked write, like [`Self::claim_due_jobs`]. A job that ran in
+    /// the last [`crate::jobs::TRIGGER_GAP`] seconds is passed over, so the
+    /// same edge reported twice runs it once.
+    pub fn claim_trigger_jobs(&self, on: crate::jobs::Trigger, now: i64) -> Result<Vec<Job>> {
+        use crate::jobs::{Schedule, TRIGGER_GAP, parse};
+        self.mutate(|d| {
+            let mut hit = Vec::new();
+            for job in &mut d.jobs {
+                let waits =
+                    job.enabled && matches!(parse(&job.schedule), Ok(Schedule::On(t)) if t == on);
+                if waits && job.last_run.is_none_or(|at| now - at >= TRIGGER_GAP) {
+                    job.last_run = Some(now);
+                    hit.push(job.clone());
+                }
+            }
+            Ok(hit)
         })
     }
 

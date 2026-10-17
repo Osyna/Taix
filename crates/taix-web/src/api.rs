@@ -40,18 +40,25 @@ pub(crate) fn route(req: &Req, hub: &Arc<crate::Hub>) -> Reply {
         ("GET", "/api/file") => file(req, hub),
         ("POST", "/api/file") => file_op(req, hub),
         ("POST", "/api/upload") => upload(req),
+        ("GET", "/api/stash") => stash_list(),
+        ("GET", "/api/raw") => raw(req, hub),
+        ("GET", "/api/find") => find(req, hub),
         ("POST", "/api/browser") => browser(req, hub),
         ("GET", "/api/git") => git(req, hub),
         ("GET", "/api/worktree") => worktree(req, hub),
         ("GET", "/api/diff") => diff(req, hub),
         ("POST", "/api/git") => git_op(req, hub),
+        ("GET", "/api/since") => since(req, hub),
+        ("GET", "/api/pr") => pr(req, hub),
         ("GET", "/api/jobs") => jobs(req, hub),
         ("POST", "/api/jobs") => jobs_op(req, hub),
         ("GET", "/api/joblog") => joblog(req, hub),
         ("GET", "/api/config") => config(req, hub),
         ("POST", "/api/config") => config_op(req, hub),
         ("GET", "/api/capture") => capture(req),
+        ("GET", "/api/search") => search(req),
         ("GET", "/api/transcript") => transcript(req),
+        ("GET", "/api/history") => history(req, hub),
         _ => Reply::fail(404, "not found"),
     }
 }
@@ -189,6 +196,195 @@ fn upload(req: &Req) -> Reply {
         ),
         Err(e) => Reply::fail(500, &e.to_string()),
     }
+}
+
+/// What `taix_core::stash` holds, newest first: the page's attachment tray
+/// after a reload, when nothing is left in its memory.
+fn stash_list() -> Reply {
+    let entries: Vec<_> = taix_core::stash::list()
+        .into_iter()
+        .map(|(path, size, modified)| {
+            let mtime = modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64);
+            serde_json::json!({
+                "name": path.file_name().unwrap_or_default().to_string_lossy(),
+                "path": path.display().to_string(),
+                "size": size,
+                "mtime": mtime,
+            })
+        })
+        .collect();
+    Reply::json(200, serde_json::json!({ "entries": entries }).to_string())
+}
+
+const RAW_MAX: u64 = 32 << 20;
+
+/// Whether `path` may be served as an image, and as which content type.
+/// The extension is the whole allow-list: SVG and HTML would run script
+/// from this origin. Access is a project root (`in_project`) or the stash;
+/// both compare canonical paths, so `..` and symlinks cannot walk out.
+/// A missing file under a refused path is a 403, not a 404, so this does
+/// not reveal what exists elsewhere.
+fn raw_target(
+    path: &Path,
+    stash: &Path,
+    in_project: bool,
+) -> Result<(PathBuf, &'static str), (u16, &'static str)> {
+    let ext = path
+        .extension()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
+    let kind = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        _ => return Err((415, "not an image type")),
+    };
+    let Ok(real) = path.canonicalize() else {
+        return Err(if in_project {
+            (404, "not found")
+        } else {
+            (403, "outside every project")
+        });
+    };
+    let in_stash = stash.canonicalize().is_ok_and(|s| real.starts_with(s));
+    if !(in_project || in_stash) {
+        return Err((403, "outside every project"));
+    }
+    Ok((real, kind))
+}
+
+/// An image's bytes, for previews of files the page has no copy of: a
+/// draft restored after a reload, the tray, a project's pictures.
+fn raw(req: &Req, hub: &Arc<crate::Hub>) -> Reply {
+    let path = Path::new(req.arg("path"));
+    if path.as_os_str().is_empty() {
+        return Reply::fail(400, "missing path");
+    }
+    let (real, kind) = match raw_target(path, &taix_core::stash::dir(), hub.allows(path)) {
+        Ok(found) => found,
+        Err((status, why)) => return Reply::fail(status, why),
+    };
+    match std::fs::metadata(&real) {
+        Ok(m) if m.len() > RAW_MAX => return Reply::fail(413, "too large"),
+        Ok(_) => {}
+        Err(e) => return Reply::fail(500, &e.to_string()),
+    }
+    match std::fs::read(&real) {
+        Ok(body) => Reply {
+            status: 200,
+            kind,
+            body,
+            headers: vec![
+                ("x-content-type-options", "nosniff".into()),
+                ("cache-control", "private, max-age=3600".into()),
+            ],
+        },
+        Err(e) => Reply::fail(500, &e.to_string()),
+    }
+}
+
+/// Files of `root` matching `q`, best first: basename starts with it, then
+/// basename contains it, then the path contains it; shorter paths win a
+/// tie, so an empty `q` lists the shallowest files.
+fn rank(rels: Vec<String>, q: &str) -> Vec<String> {
+    let q = q.to_lowercase();
+    let mut hits: Vec<(u8, String)> = rels
+        .into_iter()
+        .filter_map(|rel| {
+            let low = rel.to_lowercase();
+            let base = low.rsplit('/').next().unwrap_or(&low);
+            let tier = if base.starts_with(&q) {
+                0
+            } else if base.contains(&q) {
+                1
+            } else if low.contains(&q) {
+                2
+            } else {
+                return None;
+            };
+            Some((tier, rel))
+        })
+        .collect();
+    hits.sort_by(|a, b| (a.0, a.1.len(), &a.1).cmp(&(b.0, b.1.len(), &b.1)));
+    hits.into_iter().map(|(_, rel)| rel).collect()
+}
+
+/// Files under `root` for the @-mention picker. Git knows which are worth
+/// listing (tracked or untracked, minus ignored); outside a repository the
+/// tree is walked instead, bounded and skipping what is never wanted.
+fn find(req: &Req, hub: &Arc<crate::Hub>) -> Reply {
+    let root = Path::new(req.arg("path"));
+    if root.as_os_str().is_empty() {
+        return Reply::fail(400, "missing path");
+    }
+    if !hub.allows(root) {
+        return Reply::fail(403, "outside every project");
+    }
+    let rels: Vec<String> = match run_limited(
+        root,
+        "git",
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+        3,
+    ) {
+        Some(out) => out
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect(),
+        None => walk_files(root),
+    };
+    // `--cached` still names files deleted from disk; a mention of one is a dead path.
+    let entries: Vec<_> = rank(rels, req.arg("q"))
+        .into_iter()
+        .filter(|rel| root.join(rel).is_file())
+        .take(30)
+        .map(|rel| serde_json::json!({ "path": root.join(&rel).display().to_string(), "rel": rel }))
+        .collect();
+    Reply::json(200, serde_json::json!({ "entries": entries }).to_string())
+}
+
+/// Relative paths of regular files under `root`, at most 20000 entries seen.
+fn walk_files(root: &Path) -> Vec<String> {
+    let (mut files, mut seen) = (Vec::new(), 0);
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            seen += 1;
+            if seen > 20_000 {
+                return files;
+            }
+            let (Ok(kind), name) = (
+                entry.file_type(),
+                entry.file_name().to_string_lossy().into_owned(),
+            ) else {
+                continue;
+            };
+            if kind.is_dir() {
+                if !name.starts_with('.') && name != "node_modules" && name != "target" {
+                    stack.push(entry.path());
+                }
+            } else if kind.is_file()
+                && let Ok(rel) = entry.path().strip_prefix(root)
+            {
+                files.push(rel.display().to_string());
+            }
+        }
+    }
+    files
 }
 
 /// Ask the desktop to do something in a browser window; the GUI answers
@@ -770,6 +966,177 @@ fn git_op(req: &Req, hub: &Arc<crate::Hub>) -> Reply {
     }
 }
 
+/// Run `program args` in `dir`, killed after `secs`. Returns stdout when it exits 0.
+fn run_limited(dir: &Path, program: &str, args: &[&str], secs: u64) -> Option<String> {
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    // Drain on a thread: a full pipe would otherwise stall the child past the deadline.
+    let mut out = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        std::io::Read::read_to_end(&mut out, &mut b).ok()?;
+        Some(String::from_utf8_lossy(&b).into_owned())
+    });
+    let deadline = Instant::now() + std::time::Duration::from_secs(secs);
+    let ok = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st.success(),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(25))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break false;
+            }
+        }
+    };
+    let s = reader.join().ok()??;
+    ok.then_some(s)
+}
+
+/// "Changes since you last looked": commits in `mark..HEAD` plus the
+/// uncommitted diff. The mark itself lives in the browser.
+fn since(req: &Req, hub: &Arc<crate::Hub>) -> Reply {
+    let path = req.arg("path");
+    if path.is_empty() {
+        return Reply::fail(400, "missing path");
+    }
+    if !hub.allows(Path::new(path)) {
+        return Reply::fail(403, "outside every project");
+    }
+    let dir = Path::new(path);
+    let mark = req.arg("mark");
+    // A sha only: anything else would be read by git as an option or a range.
+    if !(4..=64).contains(&mark.len()) || !mark.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Reply::fail(400, "bad mark");
+    }
+    let Some(head) = run_limited(dir, "git", &["rev-parse", "HEAD"], 10) else {
+        return Reply::fail(500, "not a git repository or no commits");
+    };
+    let range = format!("{mark}..HEAD");
+    // None: the mark is gone (rebased away, other clone) - say so, do not guess.
+    let commits = run_limited(
+        dir,
+        "git",
+        &[
+            "log",
+            "-200",
+            "--format=%H%x1f%h%x1f%s%x1f%an%x1f%at",
+            range.as_str(),
+            "--",
+        ],
+        10,
+    )
+    .map(|text| {
+        text.lines()
+            .filter_map(|l| {
+                let mut f = l.split('\x1f');
+                Some(serde_json::json!({
+                    "hash": f.next()?,
+                    "short": f.next()?,
+                    "subject": f.next()?,
+                    "author": f.next()?,
+                    "when": f.next()?.parse::<i64>().ok()?,
+                }))
+            })
+            .collect::<Vec<_>>()
+    });
+    const MAX_DIFF: usize = 512 * 1024;
+    let mut diff = run_limited(dir, "git", &["diff", "HEAD", "--"], 10).unwrap_or_default();
+    let truncated = diff.len() > MAX_DIFF;
+    if truncated {
+        // The cut lands after a newline, an ASCII byte, so it is a char boundary.
+        let cut = diff.as_bytes()[..MAX_DIFF]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |p| p + 1);
+        diff.truncate(cut);
+    }
+    let json = serde_json::json!({
+        "head": head.trim(),
+        "commits": commits,
+        "diff": diff,
+        "truncated": truncated,
+    });
+    Reply::json(200, json.to_string())
+}
+
+/// How long a `gh pr view` answer (or its absence) is reused. gh talks to
+/// the network, so the page's polling must not reach it.
+const PR_TTL: std::time::Duration = std::time::Duration::from_secs(90);
+
+type PrCache = HashMap<(PathBuf, String), (Instant, String)>;
+static PR_CACHE: LazyLock<Mutex<PrCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The current branch's pull request: `{number,state,title,url,checks}` or
+/// `{}` when `gh` is missing, the project is no GitHub repo, or no PR exists.
+fn pr(req: &Req, hub: &Arc<crate::Hub>) -> Reply {
+    let path = req.arg("path");
+    if path.is_empty() {
+        return Reply::fail(400, "missing path");
+    }
+    if !hub.allows(Path::new(path)) {
+        return Reply::fail(403, "outside every project");
+    }
+    // The branch only keys the cache: a checkout must not show the old branch's PR.
+    let key = (PathBuf::from(path), req.arg("branch").to_string());
+    if let Ok(cache) = PR_CACHE.lock()
+        && let Some((at, json)) = cache.get(&key)
+        && at.elapsed() < PR_TTL
+    {
+        return Reply::json(200, json.clone());
+    }
+    let json = run_limited(
+        Path::new(path),
+        "gh",
+        &[
+            "pr",
+            "view",
+            "--json",
+            "number,state,title,url,statusCheckRollup",
+        ],
+        15,
+    )
+    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+    .filter(|v| v.get("number").is_some())
+    .map(|v| {
+        let (mut pass, mut fail, mut pending) = (0, 0, 0);
+        for c in v["statusCheckRollup"].as_array().into_iter().flatten() {
+            // CheckRun carries status+conclusion, StatusContext carries state.
+            let s = c["conclusion"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .or_else(|| c["state"].as_str())
+                .unwrap_or("PENDING");
+            match s {
+                "SUCCESS" | "NEUTRAL" | "SKIPPED" => pass += 1,
+                "PENDING" | "EXPECTED" | "QUEUED" | "IN_PROGRESS" => pending += 1,
+                _ => fail += 1,
+            }
+        }
+        serde_json::json!({
+            "number": v["number"],
+            "state": v["state"],
+            "title": v["title"],
+            "url": v["url"],
+            "checks": { "pass": pass, "fail": fail, "pending": pending },
+        })
+        .to_string()
+    })
+    .unwrap_or_else(|| "{}".to_string());
+    if let Ok(mut cache) = PR_CACHE.lock() {
+        cache.insert(key, (Instant::now(), json.clone()));
+    }
+    Reply::json(200, json)
+}
+
 fn jobs(_req: &Req, _hub: &Arc<crate::Hub>) -> Reply {
     let store = match taix_core::Store::open(&taix_core::Config::store_path()) {
         Ok(s) => s,
@@ -832,7 +1199,8 @@ fn jobs(_req: &Req, _hub: &Arc<crate::Hub>) -> Reply {
                 "id": run.at,
                 "job": job.id,
                 "started": run.at,
-                "ok": run.exit == Some(0),
+                "ok": run.ok(),
+                "name": job.name,
                 "summary": if let Some(err) = &run.error {
                     err.clone()
                 } else if let Some(exit) = run.exit {
@@ -1018,7 +1386,12 @@ fn joblog(req: &Req, _hub: &Arc<crate::Hub>) -> Reply {
     };
 
     let cfg = taix_core::Config::load();
-    let text = taix_core::jobs::log_tail(&cfg, id, 200);
+    // `at` picks one run's output; without it, the job's rolling log.
+    let text = match req.arg("at").parse::<i64>() {
+        Ok(at) => taix_core::jobs::run_output(&cfg, id, at)
+            .unwrap_or_else(|| "that run's output is no longer kept".to_string()),
+        Err(_) => taix_core::jobs::log_tail(&cfg, id, 200),
+    };
 
     let json = serde_json::json!({ "text": text });
     Reply::json(200, serde_json::to_string(&json).unwrap())
@@ -1141,30 +1514,75 @@ fn agent_of(req: &Req) -> Result<(taix_core::Project, taix_core::Agent), Reply> 
 /// The pane as tmux holds it: the visible screen, or the last `lines` of
 /// scrollback and screen.
 fn capture(req: &Req) -> Reply {
-    let (_, agent) = match agent_of(req) {
-        Ok(found) => found,
-        Err(reply) => return reply,
-    };
-    let Some(pane) = agent.pane else {
-        return Reply::fail(404, "window has no pane");
-    };
     let lines: usize = req.arg("lines").parse().unwrap_or(0).min(5000);
+    let start = format!("-{lines}");
+    match pane_text(req, (lines > 0).then_some(start.as_str())) {
+        Ok(text) => Reply::json(200, serde_json::json!({ "text": text }).to_string()),
+        Err(reply) => reply,
+    }
+}
+
+/// The window's pane through `capture-pane`, from line `start` (`-` is the
+/// oldest line tmux still holds) to the bottom, or just the visible screen.
+fn pane_text(req: &Req, start: Option<&str>) -> Result<String, Reply> {
+    let (_, agent) = agent_of(req)?;
+    let Some(pane) = agent.pane else {
+        return Err(Reply::fail(404, "window has no pane"));
+    };
     let socket = taix_core::Config::load().tmux_socket;
     let target = format!("%{pane}");
-    let start = format!("-{lines}");
     let mut args = vec!["-L", &socket, "capture-pane", "-p", "-J"];
-    if lines > 0 {
-        args.extend(["-S", &start, "-E", "-"]);
+    if let Some(start) = start {
+        args.extend(["-S", start, "-E", "-"]);
     }
     args.extend(["-t", &target]);
     match std::process::Command::new("tmux").args(&args).output() {
-        Ok(out) if out.status.success() => Reply::json(
-            200,
-            serde_json::json!({ "text": String::from_utf8_lossy(&out.stdout) }).to_string(),
-        ),
-        Ok(out) => Reply::fail(500, String::from_utf8_lossy(&out.stderr).trim()),
-        Err(e) => Reply::fail(500, &e.to_string()),
+        Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
+        Ok(out) => Err(Reply::fail(
+            500,
+            String::from_utf8_lossy(&out.stderr).trim(),
+        )),
+        Err(e) => Err(Reply::fail(500, &e.to_string())),
     }
+}
+
+/// Lines of the pane's whole scrollback that hold `q`, ignoring case.
+fn search(req: &Req) -> Reply {
+    let needle = req.arg("q").to_lowercase();
+    if needle.is_empty() {
+        return Reply::fail(400, "missing q");
+    }
+    match pane_text(req, Some("-")) {
+        Ok(text) => {
+            let (total, hits) = grep_lines(&text, &needle);
+            let matches: Vec<_> = hits
+                .into_iter()
+                .map(|(line, text)| serde_json::json!({ "line": line, "text": text }))
+                .collect();
+            Reply::json(
+                200,
+                serde_json::json!({ "matches": matches, "total": total, "lines": text.lines().count() })
+                    .to_string(),
+            )
+        }
+        Err(reply) => reply,
+    }
+}
+
+const MATCHES: usize = 500;
+
+/// How many lines of `text` hold the lowercase `needle`, and the last
+/// `MATCHES` of them as (1-based line number, line cut to 400 characters).
+fn grep_lines(text: &str, needle: &str) -> (usize, Vec<(usize, String)>) {
+    let mut hits: Vec<(usize, String)> = text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.to_lowercase().contains(needle))
+        .map(|(i, line)| (i + 1, line.trim_end().chars().take(400).collect()))
+        .collect();
+    let total = hits.len();
+    hits.drain(..total.saturating_sub(MATCHES));
+    (total, hits)
 }
 
 /// The tail of the window's transcript log. Outlives the pane: a killed
@@ -1194,6 +1612,34 @@ fn transcript(req: &Req) -> Reply {
     )
 }
 
+/// The commands shells have run in these windows, newest first: one window
+/// (`window=`), or all of them, narrowed to those whose text holds `q`
+/// (ignoring case). Only a shell that sends OSC 133 marks has any.
+fn history(req: &Req, hub: &Arc<crate::Hub>) -> Reply {
+    let window: Option<i64> = req.arg("window").parse().ok();
+    let needle = req.arg("q").to_lowercase();
+    let mut found: Vec<(i64, taix_term::Command)> = hub
+        .history
+        .lock()
+        .iter()
+        .filter(|(id, _)| window.is_none_or(|w| w == *id))
+        .flat_map(|(id, cmds)| cmds.iter().map(|c| (*id, c.clone())))
+        .filter(|(_, c)| needle.is_empty() || c.text.to_lowercase().contains(&needle))
+        .collect();
+    found.sort_by_key(|(_, c)| std::cmp::Reverse(c.started_ms));
+    found.truncate(500);
+    let commands: Vec<_> = found
+        .iter()
+        .map(|(id, c)| {
+            serde_json::json!({
+                "window": id, "text": c.text, "at": c.started_ms,
+                "ms": c.duration_ms, "exit": c.exit,
+            })
+        })
+        .collect();
+    Reply::json(200, serde_json::json!({ "commands": commands }).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1212,6 +1658,9 @@ mod tests {
             if_none_match: String::new(),
             peer: String::new(),
             agent: String::new(),
+            ws_key: String::new(),
+            host: String::new(),
+            raw: Default::default(),
         }
     }
 
@@ -1220,6 +1669,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn a_scrollback_search_ignores_case_numbers_lines_and_keeps_the_newest() {
+        assert_eq!(
+            grep_lines("one\nFoo bar  \nbaz\nfoo", "foo"),
+            (2, vec![(2, "Foo bar".to_string()), (4, "foo".to_string())])
+        );
+        let many = "x\n".repeat(MATCHES + 3);
+        let (total, hits) = grep_lines(&many, "x");
+        assert_eq!((total, hits.len(), hits[0].0), (MATCHES + 3, MATCHES, 4));
     }
 
     #[test]
@@ -1351,5 +1811,58 @@ mod tests {
         assert_eq!(reply.status, 403);
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn ranking_puts_basename_prefix_before_contains_before_path_and_short_first() {
+        let all = |names: &[&str]| names.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let ranked = rank(
+            all(&[
+                "src/deep/dir/Main.rs",
+                "docs/main-notes.md",
+                "src/domain.rs",
+                "main/readme.txt",
+                "main.rs",
+                "unrelated.rs",
+            ]),
+            "MAIN",
+        );
+        assert_eq!(
+            ranked,
+            [
+                "main.rs",
+                "docs/main-notes.md",
+                "src/deep/dir/Main.rs",
+                "src/domain.rs",
+                "main/readme.txt"
+            ]
+        );
+        // No query: everything matches, shortest path first.
+        assert_eq!(rank(all(&["a/b/c.rs", "z.rs", "y/x.rs"]), "")[0], "z.rs");
+    }
+
+    #[test]
+    fn a_raw_read_needs_an_image_extension_and_a_path_in_the_stash_or_a_project() {
+        let base = dir("raw");
+        let stash = base.join("stash");
+        std::fs::create_dir(&stash).unwrap();
+        std::fs::write(stash.join("a.PNG"), "x").unwrap();
+        std::fs::write(stash.join("a.svg"), "x").unwrap();
+        std::fs::write(base.join("x.png"), "x").unwrap();
+
+        let ok = raw_target(&stash.join("a.PNG"), &stash, false).unwrap();
+        assert_eq!(ok.1, "image/png");
+        assert_eq!(
+            raw_target(&stash.join("a.svg"), &stash, false)
+                .unwrap_err()
+                .0,
+            415
+        );
+        // `..` out of the stash lands on a real file that is not the stash's.
+        let escape = stash.join("../x.png");
+        assert_eq!(raw_target(&escape, &stash, false).unwrap_err().0, 403);
+        // The same file is fine once a project root covers it.
+        assert!(raw_target(&escape, &stash, true).is_ok());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

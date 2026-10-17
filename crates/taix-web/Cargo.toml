@@ -5,9 +5,16 @@ edition.workspace = true
 description = "LAN web front-end: the same TaiX, served over HTTP."
 
 [dependencies]
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
+base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
+flate2.workspace = true
+hkdf = "0.13.0"
+p256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "std"] }
+libc.workspace = true
 parking_lot.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
+sha2 = { version = "0.11.0", default-features = false }
 taix-core.workspace = true
 taix-git.workspace = true
 taix-term.workspace = true

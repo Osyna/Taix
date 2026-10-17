@@ -30,6 +30,67 @@ pub enum Schedule {
     Cron(Cron),
     /// One-shot: unix timestamp. Fires once, then the job is disabled.
     At(i64),
+    /// Not a clock at all: runs when something happens. See [`Trigger`].
+    On(Trigger),
+}
+
+/// How soon after a trigger job last ran the same event is ignored. Two
+/// fronts watching one agent both see its edge, and both ask; the second
+/// finds the job already stamped. It also bounds a chain that loops back
+/// on itself across separate runner processes.
+pub const TRIGGER_GAP: i64 = 10;
+
+/// An event a job can wait for, written `on <trigger>` in its schedule:
+/// `agent-waiting`, `agent-idle`, `port-up:<port>`, `job-done:<id>` (that
+/// job ended well) or `job-failed:<id>`. The fronts report the first three
+/// on the edge, not the level; a runner reports the last two itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trigger {
+    AgentWaiting,
+    AgentIdle,
+    PortUp(u16),
+    JobDone(JobId),
+    JobFailed(JobId),
+}
+
+impl std::str::FromStr for Trigger {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Trigger, String> {
+        let s = s.trim();
+        let (word, arg) = s
+            .split_once(':')
+            .map_or((s, None), |(w, a)| (w, Some(a.trim())));
+        Ok(match (word, arg) {
+            ("agent-waiting", None) => Trigger::AgentWaiting,
+            ("agent-idle", None) => Trigger::AgentIdle,
+            ("port-up", Some(a)) => {
+                Trigger::PortUp(a.parse().map_err(|_| format!("bad port '{a}'"))?)
+            }
+            ("job-done", Some(a)) => {
+                Trigger::JobDone(a.parse().map_err(|_| format!("bad job id '{a}'"))?)
+            }
+            ("job-failed", Some(a)) => {
+                Trigger::JobFailed(a.parse().map_err(|_| format!("bad job id '{a}'"))?)
+            }
+            _ => {
+                return Err(format!(
+                    "unknown trigger '{s}': try agent-waiting, agent-idle, port-up:<port>, job-done:<id>, job-failed:<id>"
+                ));
+            }
+        })
+    }
+}
+
+impl std::fmt::Display for Trigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Trigger::AgentWaiting => f.write_str("agent-waiting"),
+            Trigger::AgentIdle => f.write_str("agent-idle"),
+            Trigger::PortUp(p) => write!(f, "port-up:{p}"),
+            Trigger::JobDone(id) => write!(f, "job-done:{id}"),
+            Trigger::JobFailed(id) => write!(f, "job-failed:{id}"),
+        }
+    }
 }
 
 /// A 5-field cron expression, as bitmasks. Bit `n` is value `n`, so
@@ -49,6 +110,9 @@ pub struct Cron {
 /// fields, or a date-time for a one-shot job.
 pub fn parse(expr: &str) -> Result<Schedule, String> {
     let expr = expr.trim();
+    if let Some(event) = expr.strip_prefix("on ") {
+        return event.parse().map(Schedule::On);
+    }
     let Some(rest) = expr.strip_prefix('@') else {
         // Try parsing as a date-time first (YYYY-MM-DD HH:MM or similar)
         if let Ok(ts) = parse_datetime(expr) {
@@ -255,6 +319,7 @@ impl Schedule {
             Schedule::Every(secs) => after.checked_add(*secs as i64),
             Schedule::Cron(c) => c.next_after(after),
             Schedule::At(ts) => (*ts > after).then_some(*ts),
+            Schedule::On(_) => None,
         }
     }
 
@@ -414,8 +479,21 @@ pub fn next_due_at(jobs: &[Job], now: i64) -> Option<i64> {
 /// store's exclusive lock, so two runners racing on the same minute cannot
 /// both take the same job.
 pub fn run_due(store: &Store, cfg: &Config, now: i64) -> Vec<Outcome> {
-    let due = store.claim_due_jobs(now).unwrap_or_default();
-    due.iter().map(|job| run(store, cfg, job)).collect()
+    let mut out = Vec::new();
+    for job in store.claim_due_jobs(now).unwrap_or_default() {
+        run_chain(store, cfg, &job, &mut out);
+    }
+    out
+}
+
+/// Run every job waiting for `on`, claimed under the store lock like a due
+/// job, so two runners reporting one edge cannot both take it.
+pub fn fire(store: &Store, cfg: &Config, on: Trigger) -> Vec<Outcome> {
+    let mut out = Vec::new();
+    for job in store.claim_trigger_jobs(on, now()).unwrap_or_default() {
+        run_chain(store, cfg, &job, &mut out);
+    }
+    out
 }
 
 /// Force one job now, whatever its schedule says and whether or not it is
@@ -448,10 +526,16 @@ pub fn run_now(store: &Store, cfg: &Config, id: JobId) -> Outcome {
     let at = now();
     claimed.last_run = Some(at);
     let _ = store.stamp_run(id, at);
-    run(store, cfg, &claimed)
+    let mut out = Vec::new();
+    run_chain(store, cfg, &claimed, &mut out);
+    out.swap_remove(0)
 }
 
-fn run(store: &Store, cfg: &Config, job: &Job) -> Outcome {
+/// Run `job`, then whatever waits on how it ended: `job-done:<id>` after a
+/// success, `job-failed:<id>` after a failure, never both. A job already in
+/// `out` is not run again, so a loop of jobs naming each other stops after
+/// one lap.
+fn run_chain(store: &Store, cfg: &Config, job: &Job, out: &mut Vec<Outcome>) {
     let start = Instant::now();
     let outcome = execute(store, cfg, job);
     let ms = start.elapsed().as_millis() as u64;
@@ -462,7 +546,17 @@ fn run(store: &Store, cfg: &Config, job: &Job) -> Outcome {
         (!outcome.ok).then_some(outcome.detail.as_str()),
     );
     fire_notification(job, &outcome);
-    outcome
+    let on = if outcome.ok {
+        Trigger::JobDone(job.id)
+    } else {
+        Trigger::JobFailed(job.id)
+    };
+    out.push(outcome);
+    for next in store.claim_trigger_jobs(on, now()).unwrap_or_default() {
+        if out.iter().all(|o| o.job != next.id) {
+            run_chain(store, cfg, &next, out);
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -550,6 +644,11 @@ fn execute(store: &Store, cfg: &Config, job: &Job) -> Outcome {
         return outcome;
     }
     let mut log = open_log(cfg, job, stamp).ok();
+    // Where this run's share of the shared log starts.
+    let from = log
+        .as_ref()
+        .and_then(|f| f.metadata().ok())
+        .map_or(0, |m| m.len());
     let project = job.project.and_then(|id| {
         store
             .projects()
@@ -596,6 +695,7 @@ fn execute(store: &Store, cfg: &Config, job: &Job) -> Outcome {
     }
     if let Some(file) = log.as_mut() {
         let _ = writeln!(file, "--- {}", outcome.detail);
+        save_output(cfg, job.id, job.last_run.unwrap_or(stamp), from);
     }
     outcome
 }
@@ -768,6 +868,58 @@ fn open_log(cfg: &Config, job: &Job, now: i64) -> std::io::Result<File> {
     Ok(file)
 }
 
+/// A run keeps at most this much of what it printed, the end of it.
+const OUTPUT_MAX: u64 = 64 * 1024;
+/// Same as the run records a job keeps.
+const OUTPUT_RUNS: usize = 20;
+
+fn output_dir(cfg: &Config, id: JobId) -> PathBuf {
+    crate::log::dir(cfg).join("jobs").join(id.to_string())
+}
+
+/// Copy this run's slice of the job's log (everything after byte `from`)
+/// to its own file, named by the run's `at`, and forget the oldest runs.
+/// The shared log keeps scrolling; this is the part a person can still ask
+/// for by run.
+fn save_output(cfg: &Config, id: JobId, at: i64, from: u64) {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut log) = File::open(log_path(cfg, id)) else {
+        return;
+    };
+    let len = log.metadata().map_or(0, |m| m.len());
+    let mut buf = Vec::new();
+    if log
+        .seek(SeekFrom::Start(from.max(len.saturating_sub(OUTPUT_MAX))))
+        .and_then(|_| log.read_to_end(&mut buf))
+        .is_err()
+    {
+        return;
+    }
+    let dir = output_dir(cfg, id);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let _ = std::fs::write(
+        dir.join(format!("{at}.txt")),
+        String::from_utf8_lossy(&buf).as_bytes(),
+    );
+    let mut kept: Vec<i64> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.path().file_stem()?.to_str()?.parse().ok())
+        .collect();
+    kept.sort_unstable_by(|a, b| b.cmp(a));
+    for old in kept.into_iter().skip(OUTPUT_RUNS) {
+        let _ = std::fs::remove_file(dir.join(format!("{old}.txt")));
+    }
+}
+
+/// What the run that started at `at` printed, if it is still kept.
+pub fn run_output(cfg: &Config, id: JobId, at: i64) -> Option<String> {
+    std::fs::read_to_string(output_dir(cfg, id).join(format!("{at}.txt"))).ok()
+}
+
 /// The last `lines` lines of a job's log, for the UI.
 pub fn log_tail(cfg: &Config, id: JobId, lines: usize) -> String {
     let Ok(text) = std::fs::read_to_string(log_path(cfg, id)) else {
@@ -830,17 +982,48 @@ pub struct Ticker {
     next: Option<i64>,
     child: Option<Child>,
     request: Option<JobId>,
+    listens: Vec<Trigger>,
+    pending: Vec<Trigger>,
+    ports: Option<Vec<u16>>,
 }
 
 impl Ticker {
     /// Recompute the gate. Called whenever the store is reloaded.
     pub fn rearm(&mut self, jobs: &[Job], now: i64) {
         self.next = next_due_at(jobs, now);
+        self.listens = jobs
+            .iter()
+            .filter(|j| j.enabled)
+            .filter_map(|j| match parse(&j.schedule) {
+                Ok(Schedule::On(on)) => Some(on),
+                _ => None,
+            })
+            .collect();
     }
 
     /// Run this job on the next pass, whatever its schedule says.
     pub fn request(&mut self, id: JobId) {
         self.request = Some(id);
+    }
+
+    /// Something just happened. Queued only if an enabled job waits for it,
+    /// and once however often it is reported before the runner gets to it.
+    pub fn fire(&mut self, on: Trigger) {
+        if self.listens.contains(&on) && !self.pending.contains(&on) {
+            self.pending.push(on);
+        }
+    }
+
+    /// The ports being served right now. Each one that was not in the
+    /// previous reading fires `port-up`; the first reading only seeds, so
+    /// a restart does not announce every server already running.
+    pub fn ports(&mut self, now: &[u16]) {
+        if let Some(before) = self.ports.take() {
+            for &port in now.iter().filter(|p| !before.contains(p)) {
+                self.fire(Trigger::PortUp(port));
+            }
+        }
+        self.ports = Some(now.to_vec());
     }
 
     /// One housekeeping pass. `true` means a runner just finished and the
@@ -855,6 +1038,9 @@ impl Ticker {
         }
         if let Some(id) = self.request.take() {
             self.child = spawn_run_now(id).ok();
+        } else if !self.pending.is_empty() {
+            let on = self.pending.remove(0);
+            self.child = detached(&["jobs".to_string(), "fire".to_string(), on.to_string()]).ok();
         } else if self.next.is_some_and(|t| t <= now()) {
             match spawn_runner() {
                 Ok(child) => {
@@ -1207,5 +1393,159 @@ mod tests {
         // Second claim: nothing fires
         let due2 = store.claim_due_jobs(future + 100).unwrap();
         assert_eq!(due2.len(), 0, "disabled job should not fire again");
+    }
+
+    fn shell_job(store: &Store, name: &str, schedule: &str, command: &str) -> Job {
+        let mut job = store
+            .add_job(&NewJob {
+                name: name.into(),
+                enabled: true,
+                project: None,
+                schedule: schedule.into(),
+                action: crate::Action::Shell,
+            })
+            .unwrap();
+        job.command = command.into();
+        job.notify = crate::Notify::Never;
+        store.put_job(&job).unwrap();
+        job
+    }
+
+    #[test]
+    fn triggers_parse_and_round_trip_with_old_records() {
+        for text in [
+            "agent-waiting",
+            "agent-idle",
+            "port-up:5173",
+            "job-done:3",
+            "job-failed:12",
+        ] {
+            let t: Trigger = text.parse().unwrap();
+            assert_eq!(t.to_string(), text);
+            assert!(matches!(parse(&format!("on {text}")), Ok(Schedule::On(u)) if u == t));
+        }
+        for bad in [
+            "",
+            "port-up",
+            "port-up:x",
+            "job-done:",
+            "agent-idle:1",
+            "nope",
+        ] {
+            assert!(bad.parse::<Trigger>().is_err(), "{bad}");
+        }
+        // A record written before triggers existed still loads and still
+        // reads as a clock; a trigger record survives a trip through TOML.
+        let old: Job = toml::from_str(
+            "id = 1\nname = \"old\"\nschedule = \"0 9 * * 1-5\"\naction = \"shell\"\ncommand = \"true\"\n",
+        )
+        .unwrap();
+        assert!(matches!(parse(&old.schedule), Ok(Schedule::Cron(_))));
+        let mut new = old.clone();
+        new.schedule = "on job-done:1".into();
+        let back: Job = toml::from_str(&toml::to_string(&new).unwrap()).unwrap();
+        assert_eq!(back, new);
+        assert!(matches!(
+            parse(&back.schedule),
+            Ok(Schedule::On(Trigger::JobDone(1)))
+        ));
+        // An event job has no slot: the clock never claims it.
+        assert!(parse("on agent-idle").unwrap().next_after(0).is_none());
+    }
+
+    #[test]
+    fn one_edge_claims_a_job_once() {
+        let store = Store::open_memory().unwrap();
+        let waiting = shell_job(&store, "w", "on agent-waiting", "true");
+        let _idle = shell_job(&store, "i", "on agent-idle", "true");
+        let off = shell_job(&store, "off", "on agent-waiting", "true");
+        store.set_job_enabled(off.id, false).unwrap();
+
+        let got = store
+            .claim_trigger_jobs(Trigger::AgentWaiting, 1000)
+            .unwrap();
+        assert_eq!(got.iter().map(|j| j.id).collect::<Vec<_>>(), [waiting.id]);
+        // The same edge from a second front, then again inside the gap.
+        assert!(
+            store
+                .claim_trigger_jobs(Trigger::AgentWaiting, 1000)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .claim_trigger_jobs(Trigger::AgentWaiting, 1000 + TRIGGER_GAP - 1)
+                .unwrap()
+                .is_empty()
+        );
+        // A later edge fires again.
+        assert_eq!(
+            store
+                .claim_trigger_jobs(Trigger::AgentWaiting, 1000 + TRIGGER_GAP)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn port_up_fires_on_the_edge_only() {
+        let store = Store::open_memory().unwrap();
+        shell_job(&store, "dev", "on port-up:5173", "true");
+        let mut ticker = Ticker::default();
+        ticker.rearm(&store.jobs().unwrap(), 0);
+
+        ticker.ports(&[3000, 5173]); // first reading seeds: a restart is no edge
+        assert!(ticker.pending.is_empty());
+        ticker.ports(&[3000]);
+        ticker.ports(&[3000, 5173, 9999]); // came up; 9999 has no listener
+        assert_eq!(ticker.pending, [Trigger::PortUp(5173)]);
+        ticker.ports(&[3000, 5173, 9999]); // still up: level, not edge
+        assert_eq!(ticker.pending.len(), 1);
+        ticker.pending.clear();
+        ticker.ports(&[3000]);
+        ticker.ports(&[3000, 5173]); // went away and came back
+        assert_eq!(ticker.pending, [Trigger::PortUp(5173)]);
+    }
+
+    #[test]
+    fn chains_follow_success_or_failure_and_keep_output() {
+        let env = crate::testenv::redirect("XDG_DATA_HOME", "job-chain");
+        let cfg = Config::default();
+        let store = Store::open_memory().unwrap();
+
+        let a = shell_job(&store, "a", "@daily", "echo hello-from-a");
+        let after = shell_job(&store, "after", &format!("on job-done:{}", a.id), "true");
+        let rescue = shell_job(&store, "rescue", &format!("on job-failed:{}", a.id), "true");
+        assert!(run_now(&store, &cfg, a.id).ok);
+        assert_eq!(store.job(after.id).unwrap().unwrap().runs.len(), 1);
+        assert!(store.job(rescue.id).unwrap().unwrap().runs.is_empty());
+        let at = store.job(a.id).unwrap().unwrap().last().unwrap().at;
+        let out = run_output(&cfg, a.id, at).unwrap();
+        assert!(out.contains("hello-from-a"), "{out}");
+
+        let b = shell_job(&store, "b", "@daily", "exit 3");
+        let after = shell_job(&store, "after-b", &format!("on job-done:{}", b.id), "true");
+        let rescue = shell_job(
+            &store,
+            "rescue-b",
+            &format!("on job-failed:{}", b.id),
+            "true",
+        );
+        let outcome = run_now(&store, &cfg, b.id);
+        assert!(!outcome.ok && !store.job(b.id).unwrap().unwrap().last().unwrap().ok());
+        assert!(store.job(after.id).unwrap().unwrap().runs.is_empty());
+        assert_eq!(store.job(rescue.id).unwrap().unwrap().runs.len(), 1);
+
+        // Two jobs naming each other stop after one lap.
+        let x = shell_job(&store, "x", "@daily", "true");
+        let y = shell_job(&store, "y", &format!("on job-done:{}", x.id), "true");
+        let mut x2 = store.job(x.id).unwrap().unwrap();
+        x2.schedule = format!("on job-done:{}", y.id);
+        store.put_job(&x2).unwrap();
+        run_now(&store, &cfg, x.id);
+        assert_eq!(store.job(x.id).unwrap().unwrap().runs.len(), 1);
+        assert_eq!(store.job(y.id).unwrap().unwrap().runs.len(), 1);
+        drop(env);
     }
 }

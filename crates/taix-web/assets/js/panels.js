@@ -1,15 +1,22 @@
+import * as hostList from './hosts.js';
+import { myKeys, saveMyKeys, attachFile, attachSnippet } from './compose.js';
 import * as store from './store.js';
+import * as lock from './lock.js';
+import { renderHistory } from './history.js';
+import { renderPorts } from './preview.js';
+import { settingsSection } from './collab.js';
 
 // Per-project current directory for files panel
 const dirs = new Map();
 
 // Poll timers (cleared on panel close)
 let gitTimer = null;
-let infoTimer = null;
 
 // Git data cache (shared between panel and info rail)
 let gitCache = null;
 let gitCachePath = null;
+// Jobs for the info rail, refreshed on its timer rather than per frame.
+let jobsCache = null;
 
 // Job form state
 let jobFormState = null;
@@ -19,10 +26,20 @@ let jobFormState = null;
 let refreshAt = 0;
 let refreshTimer = null;
 let refreshFn = null;
+// A file preview has no live data; re-rendering it would drop the selection.
+let previewing = false;
 const REFRESH_MS = 2000;
 
 // Commit input reference for git panel
 let commitInputRef = null;
+let commitMsg = '';
+// Git panel: a sub-view (diff) is showing; how to redraw the main view.
+let gitSub = false;
+let gitReload = null;
+let gitRaw = '';
+// Previous visit's mark {sha, at} for the open project, and the PR line.
+let look = null;
+const prBox = store.h('div', { class: 'panel-section', style: 'display:none' });
 
 export function mountPanels() {
   const title = store.el('panel-title');
@@ -38,8 +55,9 @@ export function mountPanels() {
     const proj = store.project(store.selected());
     if (!proj) return;
 
-    if (name === 'files') renderFiles(title, tools, body, proj);
+    if (name === 'files') { if (!previewing) renderFiles(title, tools, body, proj); }
     else if (name === 'jobs') renderJobs(title, tools, body);
+    else if (name === 'ports') renderPorts(title, tools, body);
     else if (name === 'settings') renderSettings(title, tools, body);
   };
 
@@ -48,6 +66,7 @@ export function mountPanels() {
     clearTimeout(refreshTimer);
     refreshTimer = null;
     refreshAt = Date.now();
+    previewing = false;
     if (!name) return;
 
     const snap = store.state.snap;
@@ -59,11 +78,18 @@ export function mountPanels() {
     if (name === 'files') renderFiles(title, tools, body, proj);
     else if (name === 'git') renderGit(title, tools, body, proj);
     else if (name === 'jobs') renderJobs(title, tools, body);
+    else if (name === 'ports') renderPorts(title, tools, body);
+    else if (name === 'history') renderHistory(title, tools, body);
     else if (name === 'settings') renderSettings(title, tools, body);
   });
 
-  store.on(() => {
-    if (!store.state.panel || refreshTimer) return;
+  // Pane rows keep `snap.projects`: only a new head, or another project,
+  // is anything a panel could show differently.
+  let seen = null;
+  store.on((snap) => {
+    const key = `${store.selected()}`;
+    if (!store.state.panel || refreshTimer || (seen && seen.projects === snap?.projects && seen.key === key)) return;
+    seen = { projects: snap?.projects, key };
     const wait = Math.max(0, refreshAt + REFRESH_MS - Date.now());
     refreshTimer = setTimeout(() => {
       refreshTimer = null;
@@ -88,28 +114,34 @@ export function refreshNow() {
 function clearTimers() {
   clearInterval(gitTimer);
   gitTimer = null;
-  clearInterval(infoTimer);
-  infoTimer = null;
 }
 
 // ---------- info rail ----------
 
 function mountInfo() {
+  let seen = null;
   store.on((snap) => {
     if (!snap) return;
+    const key = `${store.selected()}`;
+    if (seen && seen.projects === snap.projects && seen.key === key) return;
+    seen = { projects: snap.projects, key };
     renderInfo(snap);
   });
 
-  // Poll git data for info rail when panel is closed
-  infoTimer = setInterval(() => {
+  // Git and jobs for the info rail, on their own clock: neither is in the
+  // snapshot, and asking on every frame was twenty requests a second.
+  const poll = () => {
     if (document.visibilityState !== 'visible') return;
     const info = store.el('info');
     if (info.offsetParent === null) return;
+    fetchJobsForInfo();
     if (store.state.panel === 'git') return; // Panel polls itself
     const proj = store.project(store.selected());
     if (!proj) return;
     fetchGitData(proj.path);
-  }, 5000);
+  };
+  setInterval(poll, 5000);
+  poll();
 }
 
 function renderInfo(snap) {
@@ -203,43 +235,34 @@ function renderInfo(snap) {
         )
       )
     );
-  } else {
-    // Initial git data fetch
+  } else if (gitCachePath !== proj.path) {
+    // Another project: its own git data, not the last one's.
+    gitCache = null;
+    gitCachePath = proj.path;
     fetchGitData(proj.path);
   }
 
   // JOBS card
-  fetchJobsForInfo().then(jobsData => {
-    if (!jobsData) return;
-    const enabled = jobsData.jobs?.filter(j => j.enabled).length || 0;
-    const next = jobsData.jobs
+  if (jobsCache) {
+    const enabled = jobsCache.jobs?.filter(j => j.enabled).length || 0;
+    const next = jobsCache.jobs
       ?.filter(j => j.enabled && j.next)
       .sort((a, b) => a.next - b.next)[0];
-    const running = jobsData.jobs?.find(j => j.last && !j.last.exit && !j.last.error);
-
-    const jobCard = store.h('div', { class: 'info-card' },
+    cards.push(store.h('div', { class: 'info-card' },
       store.h('div', { class: 'panel-label' }, 'JOBS'),
       next && store.h('div', { class: 'info-row' },
         store.h('span', { class: 'k', text: 'next' }),
         store.h('span', { class: 'v mono', text: next.name }),
         store.h('span', { class: 'v mono', text: fromNow(next.next) })
       ),
-      running && store.h('div', { class: 'info-row' },
-        store.h('span', { class: 'k', text: 'running' }),
-        store.h('span', { class: 'v mono', text: running.name }),
-        store.h('div', { class: 'meter' },
-          store.h('div', { class: 'meter-fill p-pulse', style: 'width: 100%' })
-        )
-      ),
       store.h('div', { class: 'info-row' },
         store.h('span', { class: 'k', text: 'enabled' }),
         store.h('span', { class: 'v mono', text: String(enabled) })
       )
-    );
-    cards.push(jobCard);
+    ));
+  }
 
-    info.replaceChildren(...cards);
-  });
+  info.replaceChildren(...cards);
 }
 
 async function fetchGitData(path) {
@@ -250,20 +273,21 @@ async function fetchGitData(path) {
     renderInfo(store.state.snap);
   } catch (e) {
     gitCache = null;
-    gitCachePath = null;
   }
 }
 
 async function fetchJobsForInfo() {
   try {
-    return await store.api('/api/jobs');
+    jobsCache = await store.api('/api/jobs');
+    renderInfo(store.state.snap);
   } catch (e) {
-    return null;
+    jobsCache = null;
   }
 }
 
 function formatUptime(secs) {
-  if (secs < 60) return `${secs}s`;
+  // The desktop sends whole minutes.
+  if (secs < 60) return '<1m';
   const mins = Math.floor(secs / 60);
   if (mins < 60) return `${mins}m`;
   const hours = Math.floor(mins / 60);
@@ -414,6 +438,13 @@ function renderFileBrowser(data, proj) {
             : entry.path;
           store.menu(entry.name, [
             { label: 'Open on desktop', run: () => store.send({ kind: 'open-file', path: entry.path, with: null }) },
+            !entry.dir && store.shown() && {
+              label: 'Attach to line',
+              run: () => {
+                attachFile(entry);
+                store.view('stage');
+              },
+            },
             entry.dir && { label: 'Open in terminal', run: () => store.send({ kind: 'open-file', path: entry.path }) },
             entry.dir && { label: 'New terminal here', run: () => store.send({ kind: 'terminal-at', path: entry.path }) },
             '-',
@@ -433,6 +464,7 @@ function renderFileBrowser(data, proj) {
 
 async function showFilePreview(path, proj) {
   const body = store.el('panel-body');
+  previewing = true;
   body.replaceChildren(store.h('div', { class: 'dim', text: 'Loading...' }));
 
   try {
@@ -445,7 +477,7 @@ async function showFilePreview(path, proj) {
       store.h('button', {
         class: 'chip',
         text: '← Back',
-        onclick: () => store.emit()
+        onclick: () => { previewing = false; refreshNow(); }
       })
     ];
 
@@ -481,10 +513,27 @@ async function showFilePreview(path, proj) {
       })
     );
 
+    // Attach the whole file, or just the lines selected in it.
+    if (shown) {
+      tools.push(
+        store.h('button', {
+          class: 'chip',
+          text: 'Attach',
+          onpointerdown: (e) => e.preventDefault(),
+          onclick: () => {
+            const picked = getSelection().toString();
+            if (picked.trim()) attachSnippet(picked);
+            else attachFile({ path, name: path.split('/').pop() });
+            store.view('stage');
+          }
+        })
+      );
+    }
+
     body.replaceChildren(
       ...tools,
       store.h('div', { class: 'mono dim', text: path }),
-      data.truncated && store.h('div', { class: 'row-sub bad', text: 'File truncated at 256 KiB' }),
+      ...(data.truncated ? [store.h('div', { class: 'row-sub bad', text: 'File truncated at 256 KiB' })] : []),
       store.h('div', { class: 'diff' }, ...lines)
     );
   } catch (e) {
@@ -492,7 +541,7 @@ async function showFilePreview(path, proj) {
       store.h('button', {
         class: 'chip',
         text: '← Back',
-        onclick: () => store.emit()
+        onclick: () => { previewing = false; refreshNow(); }
       }),
       store.h('div', { class: 'row-sub bad', text: String(e.message || e) })
     );
@@ -506,12 +555,30 @@ async function renderGit(title, tools, body, proj) {
   title.textContent = 'Source Control';
   tools.replaceChildren();
 
-  const load = async () => {
+  gitSub = false;
+  gitRaw = '';
+  const key = `taix.look.${proj.path}`;
+  try { look = JSON.parse(localStorage.getItem(key)); } catch (e) { look = null; }
+  if (!look || !/^[0-9a-f]{4,64}$/i.test(look.sha || '')) look = null;
+  let marked = false;
+
+  // `force`: a user action's own change. The poll leaves a sub-view, a
+  // focused commit box and an unchanged repository alone.
+  const load = async (force) => {
     try {
       const data = await store.api(`/api/git?path=${encodeURIComponent(proj.path)}`);
+      const raw = JSON.stringify(data);
+      if (!force && (gitSub || raw === gitRaw || document.activeElement === commitInputRef)) return;
+      gitRaw = raw;
       gitCache = data;
       gitCachePath = proj.path;
+      // Mark this visit; the next one reviews everything after it.
+      if (!marked && data.log.length) {
+        marked = true;
+        try { localStorage.setItem(key, JSON.stringify({ sha: data.log[0].hash, at: Math.floor(Date.now() / 1000) })); } catch (e) { /* private mode */ }
+      }
       body.replaceChildren(renderGitView(data, proj));
+      fetchPr(proj, data.branch);
     } catch (e) {
       body.replaceChildren(
         store.h('div', { class: 'row-sub bad', text: String(e.message || e) })
@@ -519,19 +586,33 @@ async function renderGit(title, tools, body, proj) {
       store.failed(e);
     }
   };
+  gitReload = () => { gitSub = false; return load(true); };
 
-  await load();
+  await load(true);
 
   // Poll every 5s while visible
   gitTimer = setInterval(() => {
     if (document.visibilityState === 'visible' && store.state.panel === 'git') {
-      load();
+      load(false);
     }
   }, 5000);
 }
 
 function renderGitView(data, proj) {
   const sections = [];
+
+  sections.push(prBox);
+  if (look && (look.sha !== data.log[0]?.hash || data.files.length)) {
+    sections.push(
+      store.h('div', { class: 'panel-section' },
+        store.h('div', { class: 'row' },
+          store.h('span', { class: 'dim', text: `Last looked ${store.ago(look.at)}` }),
+          store.h('span', { class: 'grow' }),
+          store.h('button', { class: 'chip', text: 'Since last look', onclick: () => showSince(proj, look) })
+        )
+      )
+    );
+  }
 
   // Worktree actions (when this window has its own branch)
   const win = store.windowById(store.state.shown);
@@ -629,16 +710,19 @@ function renderGitView(data, proj) {
 
   // Commit box
   if (data.files.some(f => f.staged)) {
-    commitInputRef = store.h('input', { type: 'text', placeholder: 'Commit message', autocomplete: 'off' });
+    commitInputRef = store.h('input', {
+      type: 'text', placeholder: 'Commit message', autocomplete: 'off', value: commitMsg,
+      oninput: (e) => { commitMsg = e.target.value; }
+    });
     sections.push(
       store.h('div', { class: 'panel-section' },
         commitInputRef,
         store.h('div', { class: 'row' },
-          store.h('button', { class: 'chip accent', text: 'Commit', onclick: () => {
-            if (commitInputRef.value.trim()) gitOp(proj, { op: 'commit', message: commitInputRef.value, amend: false });
+          store.h('button', { class: 'chip accent', text: 'Commit', onclick: async () => {
+            if (commitInputRef.value.trim() && await gitOp(proj, { op: 'commit', message: commitInputRef.value, amend: false })) commitMsg = '';
           }}),
-          store.h('button', { class: 'chip', text: 'Amend', onclick: () => {
-            if (commitInputRef.value.trim()) gitOp(proj, { op: 'commit', message: commitInputRef.value, amend: true });
+          store.h('button', { class: 'chip', text: 'Amend', onclick: async () => {
+            if (commitInputRef.value.trim() && await gitOp(proj, { op: 'commit', message: commitInputRef.value, amend: true })) commitMsg = '';
           }})
         )
       )
@@ -780,111 +864,107 @@ function renderGitFile(f, proj, data) {
   );
 }
 
-async function showFileDiff(root, file, staged) {
-  const body = store.el('panel-body');
-  body.replaceChildren(store.h('div', { class: 'dim', text: 'Loading diff...' }));
+function diffLines(text) {
+  return text.split('\n').map(line => {
+    const cls = line.startsWith('+') ? 'add' : line.startsWith('-') ? 'del' : line.startsWith('@@') ? 'hunk' : '';
+    return store.h('div', { class: cls, text: line || ' ' });
+  });
+}
 
+/** A sub-view of the git panel: the poll leaves it alone until Back. */
+function subView(...kids) {
+  gitSub = true;
+  const back = store.h('button', { class: 'chip', text: '← Back', onclick: () => gitReload && gitReload() });
+  store.el('panel-body').replaceChildren(back, ...kids);
+  return (...more) => store.el('panel-body').replaceChildren(back, ...more);
+}
+
+async function showDiff(url, head, text = (d) => d.text, note = () => null) {
+  const set = subView(store.h('div', { class: 'dim', text: 'Loading diff...' }));
   try {
-    const data = await store.api(`/api/diff?path=${encodeURIComponent(root)}&file=${encodeURIComponent(file)}&staged=${staged ? 1 : 0}`);
-    const lines = data.text.split('\n').map(line => {
-      let cls = '';
-      if (line.startsWith('+')) cls = 'add';
-      else if (line.startsWith('-')) cls = 'del';
-      else if (line.startsWith('@@')) cls = 'hunk';
-      return store.h('div', { class: cls, text: line || ' ' });
-    });
-    body.replaceChildren(
-      store.h('button', {
-        class: 'chip',
-        text: '← Back',
-        onclick: () => store.emit()
-      }),
-      store.h('div', { class: 'mono dim', text: file }),
-      store.h('div', { class: 'diff' }, ...lines)
+    const data = await store.api(url);
+    set(
+      store.h('div', { class: 'mono dim', text: head(data) }),
+      note(data),
+      store.h('div', { class: 'diff' }, ...diffLines(text(data)))
     );
   } catch (e) {
-    body.replaceChildren(
-      store.h('button', {
-        class: 'chip',
-        text: '← Back',
-        onclick: () => store.emit()
-      }),
-      store.h('div', { class: 'row-sub bad', text: String(e.message || e) })
-    );
+    set(store.h('div', { class: 'row-sub bad', text: String(e.message || e) }));
     store.failed(e);
   }
 }
 
-async function showCommitDiff(hash, proj) {
-  const body = store.el('panel-body');
-  body.replaceChildren(store.h('div', { class: 'dim', text: 'Loading commit...' }));
+function showFileDiff(root, file, staged) {
+  return showDiff(`/api/diff?path=${encodeURIComponent(root)}&file=${encodeURIComponent(file)}&staged=${staged ? 1 : 0}`, () => file);
+}
 
+function showCommitDiff(hash, proj) {
+  return showDiff(`/api/diff?path=${encodeURIComponent(proj.path)}&commit=${encodeURIComponent(hash)}`, () => hash);
+}
+
+function showWorktreeDiff(proj) {
+  return showDiff(
+    `/api/worktree?path=${encodeURIComponent(proj.path)}`,
+    (d) => d.base || 'base',
+    (d) => d.diff,
+    (d) => d.truncated && store.h('div', { class: 'dim', text: '(diff truncated)' })
+  );
+}
+
+/** Commits since the mark left at the previous visit, plus what is uncommitted now. */
+async function showSince(proj, mark) {
+  const set = subView(store.h('div', { class: 'dim', text: 'Loading...' }));
   try {
-    const data = await store.api(`/api/diff?path=${encodeURIComponent(proj.path)}&commit=${encodeURIComponent(hash)}`);
-    const lines = data.text.split('\n').map(line => {
-      let cls = '';
-      if (line.startsWith('+')) cls = 'add';
-      else if (line.startsWith('-')) cls = 'del';
-      else if (line.startsWith('@@')) cls = 'hunk';
-      return store.h('div', { class: cls, text: line || ' ' });
-    });
-    body.replaceChildren(
-      store.h('button', {
-        class: 'chip',
-        text: '← Back',
-        onclick: () => store.emit()
-      }),
-      store.h('div', { class: 'mono dim', text: hash }),
-      store.h('div', { class: 'diff' }, ...lines)
+    const d = await store.api(`/api/since?path=${encodeURIComponent(proj.path)}&mark=${mark.sha}`);
+    const commits = d.commits === null
+      ? [store.h('div', { class: 'dim', text: 'That commit is no longer in this history.' })]
+      : d.commits.length
+        ? d.commits.map(c => store.h('div', { class: 'row' },
+            store.h('button', { class: 'row-main', onclick: () => showCommitDiff(c.hash, proj) },
+              store.h('div', { class: 'mono', text: c.short }),
+              store.h('div', { text: c.subject }),
+              store.h('div', { class: 'dim', text: `${c.author} · ${store.ago(c.when)}` })
+            )
+          ))
+        : [store.h('div', { class: 'dim', text: 'No new commits.' })];
+    set(
+      store.h('div', { class: 'mono dim', text: `since ${mark.sha.slice(0, 7)} · ${store.ago(mark.at)}` }),
+      store.h('div', { class: 'panel-section' }, store.h('b', { text: 'Commits' }), ...commits),
+      store.h('div', { class: 'panel-section' },
+        store.h('b', { text: 'Uncommitted' }),
+        d.truncated && store.h('div', { class: 'dim', text: '(diff truncated)' }),
+        d.diff
+          ? store.h('div', { class: 'diff' }, ...diffLines(d.diff))
+          : store.h('div', { class: 'dim', text: 'Working tree clean.' })
+      )
     );
   } catch (e) {
-    body.replaceChildren(
-      store.h('button', {
-        class: 'chip',
-        text: '← Back',
-        onclick: () => store.emit()
-      }),
-      store.h('div', { class: 'row-sub bad', text: String(e.message || e) })
-    );
+    set(store.h('div', { class: 'row-sub bad', text: String(e.message || e) }));
     store.failed(e);
   }
 }
 
-async function showWorktreeDiff(proj) {
-  const body = store.el('panel-body');
-  body.replaceChildren(store.h('div', { class: 'dim', text: 'Loading worktree diff...' }));
-
+/** The branch's pull request, filled in when `gh` knows one; hidden otherwise. */
+async function fetchPr(proj, branch) {
+  let pr = {};
   try {
-    const data = await store.api(`/api/worktree?path=${encodeURIComponent(proj.path)}`);
-    const truncNote = data.truncated ? [store.h('div', { class: 'dim', text: '(diff truncated)' })] : [];
-    const lines = data.diff.split('\n').map(line => {
-      let cls = '';
-      if (line.startsWith('+')) cls = 'add';
-      else if (line.startsWith('-')) cls = 'del';
-      else if (line.startsWith('@@')) cls = 'hunk';
-      return store.h('div', { class: cls, text: line || ' ' });
-    });
-    body.replaceChildren(
-      store.h('button', {
-        class: 'chip',
-        text: '← Back',
-        onclick: () => store.emit()
-      }),
-      store.h('div', { class: 'mono dim', text: `${data.base || 'base'}` }),
-      ...truncNote,
-      store.h('div', { class: 'diff' }, ...lines)
-    );
-  } catch (e) {
-    body.replaceChildren(
-      store.h('button', {
-        class: 'chip',
-        text: '← Back',
-        onclick: () => store.emit()
-      }),
-      store.h('div', { class: 'row-sub bad', text: String(e.message || e) })
-    );
-    store.failed(e);
-  }
+    pr = await store.api(`/api/pr?path=${encodeURIComponent(proj.path)}&branch=${encodeURIComponent(branch || '')}`);
+  } catch (e) { /* no line is the answer */ }
+  prBox.replaceChildren();
+  prBox.style.display = pr.number ? '' : 'none';
+  if (!pr.number) return;
+  const c = pr.checks;
+  const [cls, sum] = c.fail ? ['failed', `${c.fail} failing`]
+    : c.pending ? ['working', `${c.pending} pending`]
+    : c.pass ? ['done', `${c.pass} passing`] : ['', 'no checks'];
+  prBox.append(store.h('div', { class: 'row' },
+    /^https:\/\//.test(pr.url)
+      ? store.h('a', { class: 'mono', href: pr.url, target: '_blank', rel: 'noopener', text: `PR #${pr.number}` })
+      : store.h('span', { class: 'mono', text: `PR #${pr.number}` }),
+    store.h('span', { class: 'badge', text: String(pr.state || '').toLowerCase() }),
+    store.h('span', { class: `badge ${cls}`, text: sum }),
+    store.h('span', { class: 'grow dim', text: pr.title })
+  ));
 }
 
 async function gitOp(proj, body) {
@@ -892,8 +972,11 @@ async function gitOp(proj, body) {
     const result = await store.api('/api/git', { path: proj.path, ...body });
     if (result.out) store.toast(result.out);
     store.emit(); // Trigger refresh
+    if (gitReload) gitReload();
+    return true;
   } catch (e) {
     store.failed(e);
+    return false;
   }
 }
 
@@ -977,7 +1060,9 @@ function renderJob(job) {
       })
     : null;
 
-  const nextText = job.next ? fromNow(job.next) : job.enabled ? 'pending' : '—';
+  const nextText = job.next ? fromNow(job.next)
+    : job.schedule.startsWith('on ') ? (job.enabled ? 'when it happens' : '—')
+    : job.enabled ? 'pending' : '—';
 
   return store.h('div', { class: job.enabled ? 'job-row' : 'job-row off' },
     store.h('div', { class: 'row' },
@@ -1016,9 +1101,12 @@ function renderJobRun(run) {
     ? store.h('span', { class: 'badge done', text: 'ok' })
     : store.h('span', { class: 'badge failed', text: 'failed' });
 
-  return store.h('div', { class: 'row' },
+  return store.h('div', {
+    class: 'row',
+    onclick: () => showJobLog({ id: run.job, name: run.name }, run.started)
+  },
     store.h('div', { class: 'row-main' },
-      store.h('div', { class: 'mono', text: run.job }),
+      store.h('div', { class: 'mono', text: run.name || run.job }),
       store.h('div', { class: 'dim', text: `${store.ago(run.started)} · ${run.summary || '—'}` })
     ),
     badge
@@ -1053,17 +1141,20 @@ function showJobForm(job) {
   };
 
   const nameInput = store.h('input', { type: 'text', value: state.name, placeholder: 'Job name' });
+  const presets = ['@hourly', '@daily', '@every 15m', 'on agent-waiting', 'on agent-idle'];
   const scheduleSelect = store.h('select', {},
     store.h('option', { value: '@hourly', text: 'Hourly', selected: state.schedule === '@hourly' }),
     store.h('option', { value: '@daily', text: 'Daily', selected: state.schedule === '@daily' }),
     store.h('option', { value: '@every 15m', text: 'Every 15 minutes', selected: state.schedule === '@every 15m' }),
-    store.h('option', { value: 'custom', text: 'Custom cron...', selected: !['@hourly', '@daily', '@every 15m'].includes(state.schedule) })
+    store.h('option', { value: 'on agent-waiting', text: 'When an agent is waiting', selected: state.schedule === 'on agent-waiting' }),
+    store.h('option', { value: 'on agent-idle', text: 'When an agent goes idle', selected: state.schedule === 'on agent-idle' }),
+    store.h('option', { value: 'custom', text: 'Custom cron or event...', selected: !presets.includes(state.schedule) })
   );
   const scheduleCustom = store.h('input', {
     type: 'text',
-    value: !['@hourly', '@daily', '@every 15m'].includes(state.schedule) ? state.schedule : '',
-    placeholder: '*/5 * * * *',
-    style: ['@hourly', '@daily', '@every 15m'].includes(state.schedule) ? 'display:none' : ''
+    value: !presets.includes(state.schedule) ? state.schedule : '',
+    placeholder: '*/5 * * * *  or  on port-up:3000  or  on job-done:1',
+    style: presets.includes(state.schedule) ? 'display:none' : ''
   });
   scheduleSelect.onchange = () => {
     scheduleCustom.style.display = scheduleSelect.value === 'custom' ? '' : 'none';
@@ -1166,12 +1257,12 @@ function showJobForm(job) {
   nameInput.focus();
 }
 
-async function showJobLog(job) {
+async function showJobLog(job, at) {
   const body = store.el('panel-body');
   body.replaceChildren(store.h('div', { class: 'dim', text: 'Loading log...' }));
 
   try {
-    const data = await store.api(`/api/joblog?id=${job.id}`);
+    const data = await store.api(`/api/joblog?id=${job.id}${at ? `&at=${at}` : ''}`);
     const lines = data.text.split('\n').map(line =>
       store.h('div', { text: line || ' ' })
     );
@@ -1181,7 +1272,15 @@ async function showJobLog(job) {
         text: '← Back',
         onclick: () => store.emit()
       }),
-      store.h('div', { class: 'mono dim', text: job.name }),
+      store.h('button', {
+        class: 'chip',
+        text: 'Run again',
+        onclick: async () => {
+          await jobOp({ op: 'run', id: job.id });
+          store.toast('Running…');
+        }
+      }),
+      store.h('div', { class: 'mono dim', text: at ? `${job.name} · ${store.ago(at)}` : job.name }),
       store.h('div', { class: 'diff' }, ...lines)
     );
   } catch (e) {
@@ -1288,6 +1387,7 @@ async function renderSettings(title, tools, body) {
   );
 
   // Keyboard section
+  const mine = myKeys();
   const symEnabled = localStorage['taix-keys-sym'] !== 'off';
   const ctlEnabled = localStorage['taix-keys-ctl'] !== 'off';
   sections.push(
@@ -1324,6 +1424,24 @@ async function renderSettings(title, tools, body) {
             }
           }
         })
+      ),
+      store.h('div', { class: 'field' },
+        store.h('label', { text: mine.length ? 'Custom keys (hold a key to add)' : 'Custom keys: hold a key, or tap +' }),
+        mine.length ? store.h('button', {
+          class: 'chip',
+          text: 'Reset',
+          onclick: () => { saveMyKeys([]); store.emit(); }
+        }) : null
+      ),
+      ...mine.map((k, i) =>
+        store.h('div', { class: 'field' },
+          store.h('label', { class: 'mono', text: `${k.label}  ${k.kind === 'run' ? `${k.value} ⏎` : k.value}` }),
+          store.h('button', {
+            class: 'chip',
+            text: 'Delete',
+            onclick: () => { saveMyKeys(myKeys().filter((_, j) => j !== i)); store.emit(); }
+          })
+        )
       )
     )
   );
@@ -1351,6 +1469,75 @@ async function renderSettings(title, tools, body) {
               }
             }
           })
+        )
+      )
+    );
+  }
+
+  // Lock-screen alerts. iOS Safari only has Web Push inside the Home Screen
+  // app, so in a plain tab there is nothing to switch on, only what to do.
+  if (store.push.needsInstall()) {
+    sections.push(
+      store.h('div', { class: 'panel-section' },
+        store.h('div', { class: 'panel-label' }, 'Lock-screen alerts'),
+        store.h('div', { class: 'row-sub', text: 'Add TaiX to the Home Screen first (Share, then Add to Home Screen), then open it from there.' })
+      )
+    );
+  } else if (store.push.supported()) {
+    const alerts = store.h('input', {
+      type: 'checkbox',
+      onchange: async (e) => {
+        const on = e.target.checked;
+        try {
+          if (on && !(await store.push.enable())) {
+            e.target.checked = false;
+            store.toast('Notification permission denied', 'bad');
+          } else if (!on) {
+            await store.push.disable();
+          }
+        } catch (err) {
+          e.target.checked = !on;
+          store.failed(err);
+        }
+      }
+    });
+    // Asked after the section is up: `ready` waits on the worker, and the
+    // rest of Settings must not.
+    store.push.current().then((sub) => { alerts.checked = !!sub; });
+    sections.push(
+      store.h('div', { class: 'panel-section' },
+        store.h('div', { class: 'panel-label' }, 'Lock-screen alerts'),
+        store.h('div', { class: 'field switch' },
+          store.h('label', { text: 'Notify me when an agent waits' }),
+          alerts
+        )
+      )
+    );
+  }
+
+  // Face ID: only where WebAuthn exists (localhost, or the tailnet's https).
+  if (lock.supported()) {
+    const faceId = store.h('input', {
+      type: 'checkbox',
+      onchange: async (e) => {
+        const on = e.target.checked;
+        try {
+          if (on) await lock.register();
+          else await lock.remove();
+          store.toast(on ? 'Face ID is now required on this device' : 'Face ID removed');
+        } catch (err) {
+          e.target.checked = !on;
+          store.failed(err);
+        }
+      }
+    });
+    lock.state().then((s) => { faceId.checked = s.registered; }, () => {});
+    sections.push(
+      store.h('div', { class: 'panel-section' },
+        store.h('div', { class: 'panel-label' }, 'Security'),
+        store.h('div', { class: 'field switch' },
+          store.h('label', { text: 'Require Face ID on this device' }),
+          faceId
         )
       )
     );
@@ -1410,6 +1597,8 @@ async function renderSettings(title, tools, body) {
     );
   }
 
+  sections.push(settingsSection());
+
   // Server info
   if (snap?.health) {
     const health = snap.health;
@@ -1430,6 +1619,7 @@ async function renderSettings(title, tools, body) {
       )
     );
   }
+  sections.push(hostList.section());
 
   body.replaceChildren(store.h('div', {}, ...sections));
 }

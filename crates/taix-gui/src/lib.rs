@@ -21,6 +21,7 @@ mod palette;
 mod pango;
 mod perf;
 mod presets;
+mod procs;
 mod search;
 mod settings;
 mod theme;
@@ -315,6 +316,7 @@ fn wire(shared: &Shared, w: &ui::Widgets) {
         Box::new(|s| s.borrow().copy_terminal_command()),
     );
     push("copy-tmux", Box::new(|s| s.borrow().copy_tmux_command()));
+    push("attachments", Box::new(|s| s.borrow().open_attachments()));
     push(
         "settings",
         Box::new({
@@ -457,6 +459,14 @@ fn wire(shared: &Shared, w: &ui::Widgets) {
         move || {
             if let Ok(app) = shared.try_borrow() {
                 app.refresh_perf();
+            }
+        }
+    });
+    w.procs.connect_show({
+        let shared = shared.clone();
+        move |scope| {
+            if let Ok(app) = shared.try_borrow() {
+                app.refresh_procs(scope);
             }
         }
     });

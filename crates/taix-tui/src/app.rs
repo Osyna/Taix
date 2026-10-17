@@ -877,6 +877,13 @@ impl App {
             }
             row.agent.state = state;
             updates.push((row.agent.id, state));
+            if row.agent.kind != terminal {
+                match state {
+                    AgentState::Waiting => self.jobs.fire(taix_core::jobs::Trigger::AgentWaiting),
+                    AgentState::Idle => self.jobs.fire(taix_core::jobs::Trigger::AgentIdle),
+                    _ => {}
+                }
+            }
             let wants = state.needs_attention() && row.agent.kind != terminal;
             if wants && row.notified_state != Some(state) {
                 alerts.push((row.agent.id, row.agent.name.clone(), state));
@@ -1112,6 +1119,7 @@ impl App {
             let when = match taix_core::jobs::parse(&job.schedule) {
                 Err(e) => format!("bad schedule: {e}"),
                 Ok(_) if !job.enabled => "off".to_string(),
+                Ok(taix_core::jobs::Schedule::On(on)) => format!("on {on}"),
                 Ok(schedule) => schedule
                     .next_after(job.last_run.unwrap_or(job.created))
                     .map_or("never".to_string(), |t| {

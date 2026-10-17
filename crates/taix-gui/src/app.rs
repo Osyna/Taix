@@ -47,6 +47,9 @@ pub const SLOW_INTERVAL: Duration = Duration::from_secs(5);
 /// Unfocused panes cost one `capture-pane` fork per refresh, so they are
 /// deliberately slower than the focused pane.
 pub const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(400);
+/// A pane a browser watches that printed nothing is still captured this
+/// often: a resize reflows it without any output to say so.
+pub const WEB_RESYNC: Duration = Duration::from_secs(2);
 /// How often derived agent states are written back to the store while
 /// output is arriving: a "needs you" transition should not wait longer
 /// than this. With every pane silent, states can only drift to Idle, and
@@ -77,6 +80,20 @@ const GIT_INTERVAL: Duration = Duration::from_millis(4000);
 const DIFF_CAP: usize = 200_000;
 /// Lines a wheel notch moves the scrollback view.
 const SCROLL_STEP: i32 = 3;
+
+/// Wall-clock seconds since the epoch: the web page's clock, not ours.
+fn epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The same clock in milliseconds, for command timings.
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
 
 /// Park a pasted or dropped image where a harness can read it, and return
 /// the path to type. The bytes go where an upload from a phone goes - see
@@ -169,6 +186,8 @@ fn mib(kib: u64) -> String {
 struct Row {
     agent: Agent,
     watcher: Watcher,
+    /// OSC 133 marks followed through this pane's output: the commands it ran.
+    shell: taix_term::Shell,
     live: Option<Live>,
     card: AgentCard,
     dirty: bool,
@@ -186,6 +205,11 @@ struct Row {
     /// was derived from.
     cpu: f64,
     ticks: u64,
+    /// The pane's own process, as of the last housekeeping pass.
+    pid: Option<u32>,
+    /// Ports its tree listens on, and how many processes run under the
+    /// pane's own: what its sidebar row and pane header show.
+    procs: (Vec<u16>, usize),
     /// Transcript log, opened on this window's first output.
     log: Option<taix_core::log::Log>,
     /// Last time this window produced output, for the idle reaper.
@@ -193,6 +217,8 @@ struct Row {
     /// Suppresses repeat notifications while an agent sits in the same
     /// attention-worthy state.
     notified_state: Option<AgentState>,
+    /// Epoch seconds of the last state change, for the web page's timers.
+    state_since: u64,
     /// Grid size last pushed to tmux, and when the widget last changed size.
     /// Resizing tmux is a fork plus a reflow, so it is debounced rather than
     /// done on every frame of a divider drag.
@@ -201,21 +227,35 @@ struct Row {
     /// Output events stamped at or below this were already on the screen
     /// the emulator was seeded from, so feeding them would print them twice.
     seed_seq: u64,
-    /// This pane's screen as HTML, for the web front end, and when it was
-    /// last built from a capture. Only maintained while a browser is
-    /// watching; the desktop draws from the same chunks into Pango instead.
-    web_html: String,
+    /// This pane's screen for the web front end, and when it was last built
+    /// from a capture. Only maintained while a browser is watching; the
+    /// desktop draws from the same chunks into Pango instead.
+    web_screen: taix_web::html::Screen,
     web_snap: Instant,
-    /// The grid `web_html` was rendered at. Not `applied_size`: a pane a
+    /// The grid `web_screen` was rendered at. Not `applied_size`: a pane a
     /// browser is watching in a project this screen is not showing has no
     /// widget, so no layout size, but tmux still has a grid for it.
     web_size: Size,
+    /// The pane is on the alternate screen, as of `web_screen`.
+    web_alt: bool,
+    /// An emulator for a pane a browser drives that the desktop does not
+    /// have focused, fed from the same output as `live` (which it never
+    /// coexists with) so the page needs no capture to follow it.
+    web_live: Option<Live>,
+    /// The emulator moved since `web_screen` was rendered from it.
+    web_dirty: bool,
     /// The grid a browser driving this window asked for, if one does. It
     /// outranks the widget: whoever is typing decides how wide the terminal
     /// is, and on a phone that is the only way the text is legible.
     web_grid: Option<Size>,
     /// Last rendered markup, held to skip redundant set_markup calls.
     last_markup: String,
+    /// Files pasted or dropped into the current line, and how many
+    /// characters each typed: the chips over the pane. Cleared on submit.
+    attached: Vec<(PathBuf, usize)>,
+    /// Nothing was typed after the last attached file, so Remove can
+    /// backspace it off the line.
+    attach_tail: bool,
 }
 
 impl Row {
@@ -298,6 +338,10 @@ pub struct App {
     mem: (u64, u64, u64, u64),
     /// Panes the tmux server is holding, read on the memory cadence.
     panes: usize,
+    /// Every pane process's tree as last read, and which of them listen
+    /// on a port: what the process monitor is drawn from.
+    table: taix_core::mem::ProcTable,
+    ports: taix_core::procs::Ports,
     /// The server's pid and version: fixed for its life, asked once.
     server: Option<(u32, String)>,
     /// When the readings behind `mem` and each row's `cpu` were taken. CPU
@@ -341,6 +385,8 @@ pub struct App {
     /// `WEB_INTERVAL` so an attached browser cannot pin the UI thread to
     /// the frame rate.
     last_web_publish: Instant,
+    /// A command finished since the web hub was last handed the histories.
+    history_dirty: bool,
     /// What only the web page asks for and nothing changes between frames.
     web_slow: WebSlow,
     /// The LAN front end: the server's life and the input lock both sides
@@ -453,6 +499,16 @@ enum Pointer {
     TerminalAt(PathBuf),
     /// One line for the status label.
     Notice(String),
+    /// A port in the process monitor: open it in this window's project.
+    OpenPort(AgentId, String),
+    /// Files to type into the focused pane's line, shown as chips over it.
+    Attach(Vec<PathBuf>),
+    /// Stash a pane's selected text as a file and attach it like a paste.
+    AttachSelection(AgentId),
+    /// Remove a window's attached file by index.
+    Unattach(AgentId, usize),
+    /// A link clicked in a pane: a new browser tab in that window's project.
+    OpenLink(AgentId, String),
     /// A diff the source-control panel already read: a title and the text.
     ShowDiff(String, String),
     /// Move one pane's view through tmux's history.
@@ -514,11 +570,10 @@ impl App {
             SESSION_ROWS,
         )?;
         // tmux, not the emulators, holds history. Set it once per server.
-        // Tier 1: 4 busy panes cost 76.7 MB of tmux server memory at 20000 vs
-        // 9.0 MB at 2000, at ~0.95 KB per line per pane.
-        const HISTORY_LIMIT: usize = 2_000;
+        // ~0.95 KB per line per pane when full: 2000 lines lost the start of
+        // a long agent turn, so the default is 10000 (config `history_limit`).
         let tmux = Client::attach(&cfg.tmux_socket, &cfg.tmux_session)?;
-        let _ = cmd::set_history_limit(&tmux, HISTORY_LIMIT);
+        let _ = cmd::set_history_limit(&tmux, cfg.history_limit);
         let server = cmd::server(&tmux).ok();
         let font_pt = cfg.font_size;
         // Restore the divider the user last dragged before anything is shown.
@@ -619,6 +674,8 @@ impl App {
             store_stamp: None,
             mem: (0, 0, 0, 0),
             panes: 0,
+            table: Default::default(),
+            ports: Default::default(),
             server,
             measured_at: Instant::now(),
             bar_git: None,
@@ -636,6 +693,7 @@ impl App {
             last_git: Instant::now() - GIT_INTERVAL,
             web_slow: WebSlow::default(),
             last_web_publish: Instant::now() - WEB_INTERVAL,
+            history_dirty: false,
             jobs: taix_core::jobs::Ticker::default(),
             web,
             git_worker_busy: std::cell::Cell::new(false),
@@ -645,6 +703,10 @@ impl App {
             move |ip, allow| {
                 pending.push(Pointer::Pair { ip, allow });
             }
+        });
+        built.w.procs.connect_open({
+            let pending = built.pending.clone();
+            move |id, url| pending.push(Pointer::OpenPort(id, url))
         });
         built.refresh_editors();
         Ok(built)
@@ -681,8 +743,16 @@ impl App {
         // Ctrl is what reaches the text underneath - the modifier a terminal
         // reserves for exactly this.
         let cell = {
-            let (root, body) = (card.root.clone(), card.body.clone());
+            let (root, body, files) = (card.root.clone(), card.body.clone(), card.files.clone());
             move |x: f64, y: f64| -> Option<(usize, usize)> {
+                // A file chip floats over the text: a click on it is not a
+                // click on the cell underneath.
+                if root
+                    .pick(x, y, gtk::PickFlags::DEFAULT)
+                    .is_some_and(|w| w == files || w.is_ancestor(&files))
+                {
+                    return None;
+                }
                 let point = gtk::graphene::Point::new(x as f32, y as f32);
                 let at = root.compute_point(&body, &point)?;
                 let (cw, ch) = ui::cell_size(&body);
@@ -789,7 +859,7 @@ impl App {
         // pointer. Throttled to a cell change: a pixel is not a terminal
         // event, and every report costs a round trip to tmux.
         let motion = gtk::EventControllerMotion::new();
-        let (cells, holding, at, mouse) = (cell, held, hover.clone(), card.mouse.clone());
+        let (cells, holding, at, mouse) = (cell.clone(), held, hover.clone(), card.mouse.clone());
         let pending = self.pending.clone();
         motion.connect_motion(move |controller, x, y| {
             let Some(now) = cells(x, y) else { return };
@@ -813,6 +883,30 @@ impl App {
             }
         });
         card.root.add_controller(motion);
+
+        // A click (not a drag: that is a selection) on a URL opens it. A
+        // program that wants the pointer keeps plain clicks; Ctrl reaches
+        // the link underneath, as everywhere else in the pane.
+        let link = gtk::GestureClick::new();
+        link.set_button(gtk::gdk::BUTTON_PRIMARY);
+        // Capture, for the same reason as the focus click above: the
+        // selectable label takes the press in the bubble phase.
+        link.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let (mouse, pending, body) = (card.mouse.clone(), self.pending.clone(), card.body.clone());
+        link.connect_released(move |gesture, n, x, y| {
+            let ctrl = gesture
+                .current_event_state()
+                .contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            if n != 1 || (mouse.get().wanted() && !ctrl) || body.selection_bounds().is_some() {
+                return;
+            }
+            let Some((col, row)) = cell(x, y) else { return };
+            let text = body.text();
+            if let Some(url) = text.lines().nth(row).and_then(|line| url_at(line, col)) {
+                pending.push(Pointer::OpenLink(id, url.to_string()));
+            }
+        });
+        card.root.add_controller(link);
         // GTK4 has no size-allocate signal, but the viewport's adjustments
         // follow its allocation, so a window resize, a divider drag or a
         // panel toggle asks for the tick that `autosize` runs in.
@@ -986,9 +1080,10 @@ impl App {
             Pointer::RestoreSession(name) => self.restore_session(&name)?,
             Pointer::Drop(id, path) => {
                 self.set_focus(id);
-                let arg = keys::path_argument(&path);
-                self.type_text(&arg);
+                self.attach(&[path]);
             }
+            Pointer::Attach(paths) => self.attach(&paths),
+            Pointer::Unattach(id, i) => self.unattach(id, i),
             // Closing keeps the worktree: killing a process is recoverable,
             // discarding unreviewed work is not, so that is a separate item.
             Pointer::Close(id) => self.kill_agent(id, false)?,
@@ -1000,9 +1095,7 @@ impl App {
             Pointer::BrowserUrl(id, url) => self.browser_url(id, url),
             Pointer::Interrupt(id) => {
                 self.set_focus(id);
-                if let Some(pane) = self.focused_pane() {
-                    let _ = cmd::send_key(&self.tmux, pane, "C-c");
-                }
+                self.send_keys(id, &keys::Press::Named("C-c".into()));
             }
             Pointer::Rename(id, name) => {
                 self.store
@@ -1044,12 +1137,30 @@ impl App {
                     row.card.body.select_region(0, -1);
                 }
             }
+            Pointer::AttachSelection(id) => {
+                self.set_focus(id);
+                let Some(text) = self.selected_text().filter(|t| !t.trim().is_empty()) else {
+                    ui::toast(&self.w, "Select some text to attach first");
+                    return Ok(());
+                };
+                let path = taix_core::stash::stash(text.as_bytes(), &keys::snippet_name(&text))
+                    .map_err(|e| format!("cannot save the selection: {e}"))?;
+                self.attach(&[path]);
+            }
             Pointer::Type(text) => self.type_text(&text),
             Pointer::OpenFile(path, editor) => self.open_file(&path, editor.as_deref())?,
             Pointer::TerminalAt(dir) => self.terminal_at(&dir)?,
             Pointer::Notice(text) => ui::set_status(&self.w, &text),
+            Pointer::OpenPort(id, url) => {
+                let project = self.row(id).ok_or("that window is gone")?.agent.project;
+                self.open_url(project, &url)?;
+            }
             Pointer::ShowDiff(title, text) => {
                 ui::show_text(&self.w.window, &title, &unified_markup(&text), false)
+            }
+            Pointer::OpenLink(id, url) => {
+                let project = self.row(id).ok_or("that window is gone")?.agent.project;
+                self.open_link(project, &url)?;
             }
             Pointer::Select(id) => self.select_project(id),
             Pointer::NewTerminal(project) => {
@@ -1161,11 +1272,21 @@ impl App {
     /// until the user asks: a relaunched agent costs a login, a model, a
     /// context, and a dashboard has no business spending those on its own.
     fn relaunch(&mut self, id: AgentId) -> Result<(), String> {
+        if self.start_pane(id)? {
+            self.set_focus(id);
+        }
+        Ok(())
+    }
+
+    /// `relaunch` without taking this screen there: what a browser's
+    /// "start" means, since the person asking is not looking at it.
+    /// True when a pane was opened.
+    pub(super) fn start_pane(&mut self, id: AgentId) -> Result<bool, String> {
         let Some(row) = self.row(id) else {
-            return Ok(());
+            return Ok(false);
         };
         if row.agent.pane.is_some() {
-            return Ok(());
+            return Ok(false);
         }
         let agent = row.agent.clone();
         let project = self
@@ -1174,8 +1295,7 @@ impl App {
             .clone();
         taix_core::spawn::relaunch(&self.store, &self.cfg, &project, &agent)?;
         self.reload();
-        self.set_focus(id);
-        Ok(())
+        Ok(true)
     }
 
     /// Copy every live pane's scrollback out to the cache, so a window whose
@@ -1345,6 +1465,9 @@ impl App {
                     let mut row = self.rows.swap_remove(i);
                     row.card
                         .update(&agent, &self.cfg, tint(&self.cfg, &agent).as_deref());
+                    if row.agent.pane != agent.pane {
+                        row.web_live = None;
+                    }
                     row.agent = agent;
                     row.dirty = true;
                     kept.push(row);
@@ -1352,6 +1475,11 @@ impl App {
                 None => {
                     let card = ui::agent_card(&agent, &self.cfg);
                     self.wire_pointer(&card, agent.id);
+                    self.w.procs.attach(
+                        &card.procs_label,
+                        crate::procs::Scope::Window(agent.id),
+                        gtk::PositionType::Bottom,
+                    );
                     // Seed the watcher from what is on screen. A row built
                     // after a restart has no output history, so a window that
                     // then goes quiet could never have a state derived again:
@@ -1375,17 +1503,26 @@ impl App {
                         mem_kib: None,
                         cpu: 0.0,
                         ticks: 0,
+                        pid: None,
+                        procs: Default::default(),
                         log: None,
                         active: Instant::now(),
                         notified_state: None,
+                        state_since: epoch_secs(),
                         applied_size: None,
                         resize_pending_since: None,
                         seed_seq: 0,
-                        web_html: String::new(),
+                        shell: Default::default(),
+                        web_screen: Default::default(),
                         web_snap: Instant::now() - SNAPSHOT_INTERVAL,
                         web_size: Size { cols: 80, rows: 24 },
+                        web_alt: false,
+                        web_live: None,
+                        web_dirty: false,
                         web_grid: None,
                         last_markup: String::new(),
+                        attached: Vec::new(),
+                        attach_tail: false,
                     });
                 }
             }
@@ -1511,6 +1648,11 @@ impl App {
                 .connect_clicked(move |_| pending.push(Pointer::ToggleFold(id)));
             self.wire_project_actions(&card.root, id);
             self.wire_project_drop(&card.root, id);
+            self.w.procs.attach(
+                &card.procs,
+                crate::procs::Scope::Project(id),
+                gtk::PositionType::Right,
+            );
             for row in &card.windows {
                 let agent = row.id;
                 let pending = self.pending.clone();
@@ -1523,10 +1665,18 @@ impl App {
                     pending.push(Pointer::Close(agent));
                 });
                 self.wire_window_actions(&row.root, agent);
+                self.w.procs.attach(
+                    &row.procs,
+                    crate::procs::Scope::Window(agent),
+                    gtk::PositionType::Right,
+                );
             }
         }
         ui::set_sidebar(&self.w, &cards);
         self.sidebar = cards;
+        // New chips start empty: fill them from the last reading now, not
+        // on the next one two seconds away.
+        self.paint_procs();
     }
 
     /// Accept another project card dropped on this one. The pointer's half
@@ -1645,6 +1795,10 @@ impl App {
         push("copy", Box::new(move || Pointer::CopyPane(id)));
         push("select-all", Box::new(move || Pointer::SelectAll(id)));
         push("paste", Box::new(move || Pointer::PastePane(id)));
+        push(
+            "attach-selection",
+            Box::new(move || Pointer::AttachSelection(id)),
+        );
         push("interrupt", Box::new(move || Pointer::Interrupt(id)));
         push("kill", Box::new(move || Pointer::Kill(id)));
         push("restart", Box::new(move || Pointer::Restart(id)));
@@ -1740,7 +1894,7 @@ impl App {
             if let Ok(Some(texture)) = clipboard.read_texture_future().await {
                 match stash_image(&texture.save_to_png_bytes()) {
                     Ok(path) => {
-                        pending.push(Pointer::Type(keys::path_argument(&path)));
+                        pending.push(Pointer::Attach(vec![path.clone()]));
                         ui::set_status(&w, &format!("pasted image → {}", path.display()));
                     }
                     Err(e) => ui::set_status(&w, &format!("cannot save pasted image: {e}")),
@@ -1754,14 +1908,9 @@ impl App {
                 .await
                 && let Ok(list) = value.get::<gtk::gdk::FileList>()
             {
-                let paths: String = list
-                    .files()
-                    .iter()
-                    .filter_map(|f| f.path())
-                    .map(|p| keys::path_argument(&p))
-                    .collect();
+                let paths: Vec<PathBuf> = list.files().iter().filter_map(|f| f.path()).collect();
                 if !paths.is_empty() {
-                    pending.push(Pointer::Type(paths));
+                    pending.push(Pointer::Attach(paths));
                     return;
                 }
             }
@@ -1778,7 +1927,7 @@ impl App {
         use crate::files::Ask;
         self.pending.push(match ask {
             Ask::Open(path, editor) => Pointer::OpenFile(path, editor),
-            Ask::Insert(path) => Pointer::Type(keys::path_argument(&path)),
+            Ask::Insert(path) => Pointer::Attach(vec![path]),
             Ask::Terminal(dir) => Pointer::TerminalAt(dir),
             Ask::Notice(text) => Pointer::Notice(text),
         });
@@ -2053,18 +2202,11 @@ impl App {
             return;
         };
         if let Some(row) = self.row_mut(id) {
-            let mut live = Live::new(Size {
-                cols: seed.cols,
-                rows: seed.rows,
-            });
-            live.seed(&seed.screen, seed.cursor);
-            // A capture carries text and colour, never modes, so without
-            // tmux's own flags a pane running a TUI came back from every
-            // focus change believing nothing wanted the pointer - and its
-            // buttons went back to selecting text.
-            live.feed(&seed.modes);
+            let live = primed(&seed);
             row.card.mouse.set(live.mouse());
             row.live = Some(live);
+            row.web_live = None;
+            row.web_dirty = true;
             row.dirty = true;
             row.seed_seq = seed.seq;
         }
@@ -2464,13 +2606,6 @@ impl App {
         Ok(())
     }
 
-    /// The focused pane, if any. Every keystroke lands here.
-    fn focused_pane(&self) -> Option<u32> {
-        self.focus
-            .and_then(|id| self.row(id))
-            .and_then(|r| r.agent.pane)
-    }
-
     /// Forward one keystroke to the focused pane.
     ///
     /// Written into the control-mode client, not a `tmux send-keys` process:
@@ -2517,6 +2652,9 @@ impl App {
         // Typing returns the pane to the live bottom, the way it does in every
         // terminal: you cannot type usefully into history.
         self.back_to_live(id);
+        let submit = matches!(press, keys::Press::Named(n) if n == "Enter" || n == "C-c")
+            || matches!(press, keys::Press::Bytes(b) if b.as_slice() == [0x0d]);
+        self.line_moved(id, submit);
         let Some(pane) = self.row(id).and_then(|r| r.agent.pane) else {
             return;
         };
@@ -2557,6 +2695,7 @@ impl App {
             return;
         }
         self.back_to_live(id);
+        self.line_moved(id, false);
         if let Some(pane) = self.row(id).and_then(|r| r.agent.pane) {
             let _ = cmd::send_text(&self.tmux, pane, text);
         }
@@ -2570,6 +2709,80 @@ impl App {
         if let Some(pane) = self.row(id).and_then(|r| r.agent.pane) {
             let _ = taix_tmux::cmd::paste(&self.tmux, pane, text);
         }
+    }
+
+    /// Pick from the stash instead of pasting the same file again.
+    pub fn open_attachments(&self) {
+        let mut files = taix_core::stash::list();
+        files.truncate(50);
+        let pending = self.pending.clone();
+        ui::recent_attachments(&self.w.window, &files, move |path| {
+            pending.push(Pointer::Attach(vec![path]));
+        });
+    }
+
+    /// Type file paths into the focused pane's line and show each as a chip.
+    fn attach(&mut self, paths: &[PathBuf]) {
+        let Some(id) = self.focus else { return };
+        if self.hand_off(id) {
+            return;
+        }
+        for path in paths {
+            let n = self.row(id).map_or(0, |row| row.attached.len()) + 1;
+            let arg = format!("{} {}", keys::mark(n), keys::path_argument(path));
+            // A paste, so a TUI with bracketed paste on sees one, not keys.
+            self.paste_text(id, &arg);
+            if let Some(row) = self.row_mut(id) {
+                row.attached.push((path.clone(), arg.chars().count()));
+            }
+        }
+        if let Some(row) = self.row_mut(id) {
+            row.attach_tail = true;
+        }
+        self.paint_files(id);
+    }
+
+    /// Backspace the last attached file off the line, if nothing was typed
+    /// after it. Any other chip has text behind it that is not ours to eat.
+    fn unattach(&mut self, id: AgentId, i: usize) {
+        let Some(row) = self.row_mut(id) else { return };
+        if !row.attach_tail || i + 1 != row.attached.len() {
+            return;
+        }
+        let (_, typed) = row.attached.pop().unwrap_or_default();
+        let pane = row.agent.pane;
+        if let Some(pane) = pane {
+            let _ = cmd::send_bytes(&self.tmux, pane, &vec![0x7f; typed]);
+        }
+        self.paint_files(id);
+    }
+
+    /// Something else reached the line: a submit forgets the chips, any
+    /// other key means the last one is no longer at the end.
+    fn line_moved(&mut self, id: AgentId, submit: bool) {
+        let Some(row) = self.row_mut(id) else { return };
+        if row.attached.is_empty() || (!submit && !row.attach_tail) {
+            return;
+        }
+        if submit {
+            row.attached.clear();
+        }
+        row.attach_tail = false;
+        self.paint_files(id);
+    }
+
+    fn paint_files(&self, id: AgentId) {
+        let Some(row) = self.row(id) else { return };
+        let last = row.attached.len().wrapping_sub(1);
+        let files: Vec<(&Path, bool)> = row
+            .attached
+            .iter()
+            .enumerate()
+            .map(|(i, (path, _))| (path.as_path(), row.attach_tail && i == last))
+            .collect();
+        let pending = self.pending.clone();
+        row.card
+            .set_files(&files, move |i| pending.push(Pointer::Unattach(id, i)));
     }
 
     // ---------- frame ----------
@@ -2676,6 +2889,7 @@ impl App {
         // `self` mutably, so the config cannot be read through it.
         let cfg_log = self.cfg.clone();
         let mut topology_changed = false;
+        let mut command_finished = false;
         for ev in self.tmux.bus.drain() {
             match ev {
                 Ev::Output { pane, data, seq } => {
@@ -2697,17 +2911,31 @@ impl App {
                     if let Some(row) = self.row_by_pane(pane) {
                         row.watcher.observe(&data, now);
                         row.active = now;
-                        // The seed's screen already shows anything stamped
-                        // before it; feeding it again printed the last line
-                        // twice.
-                        if seq > row.seed_seq
-                            && let Some(live) = &mut row.live
-                        {
-                            live.feed(&data);
-                            // A TUI turns reporting on when it starts and off
-                            // when it exits, both in this stream, and the
-                            // pointer handlers cannot borrow the row to ask.
-                            row.card.mouse.set(live.mouse());
+                        if row.live.is_some() || row.web_live.is_some() {
+                            // The seed's screen already shows anything
+                            // stamped before it; feeding it again printed
+                            // the last line twice.
+                            if seq > row.seed_seq
+                                && let Some(live) = row.live.as_mut().or(row.web_live.as_mut())
+                            {
+                                live.feed(&data);
+                                // A TUI turns reporting on when it starts and
+                                // off when it exits, both in this stream, and
+                                // the pointer handlers cannot borrow the row
+                                // to ask.
+                                row.card.mouse.set(live.mouse());
+                                row.web_dirty = true;
+                            }
+                        } else {
+                            // No emulator here, but a phone may be watching
+                            // this pane and its wheel needs the same answer.
+                            let mut mouse = row.card.mouse.get();
+                            mouse.scan(&data);
+                            row.card.mouse.set(mouse);
+                        }
+                        // The same stream carries the shell's prompt marks.
+                        if row.shell.feed(&data, epoch_ms()) {
+                            command_finished = true;
                         }
                         // Every pane's output passes through this one client,
                         // so a transcript costs a buffered append and nothing
@@ -2725,13 +2953,24 @@ impl App {
                 }
                 // tmux is the source of truth for which panes exist. One
                 // resize notifies once per window; one reload serves them all.
-                Ev::Layout { .. } | Ev::WindowsChanged => topology_changed = true,
+                // An emulator's grid is fixed at construction, so a window
+                // whose layout moved gets its web emulator seeded again.
+                Ev::Layout { window, .. } => {
+                    for row in &mut self.rows {
+                        if row.agent.window == Some(window) {
+                            row.web_live = None;
+                        }
+                    }
+                    topology_changed = true;
+                }
+                Ev::WindowsChanged => topology_changed = true,
                 Ev::Exit => eprintln!("[tmux] control client exited"),
             }
         }
         if topology_changed {
             self.reload();
         }
+        self.history_dirty |= command_finished;
         // Drawing is the whole per-frame cost: a `capture-pane` fork per
         // unfocused pane, a markup string, and a Pango reshape. None of it is
         // worth a cycle while nobody can see the window, and tmux keeps every
@@ -2869,10 +3108,16 @@ impl App {
             self.set_focus(id);
         }
         let Some(target) = self.row(id) else { return };
-        let (Some(pane), Some(live)) = (target.agent.pane, target.live.as_ref()) else {
+        let Some(pane) = target.agent.pane else {
             return;
         };
-        if let Some(bytes) = taix_term::report(live.mouse(), button, col, row, kind) {
+        // Without an emulator (a pane only a browser is driving), the modes
+        // scanned from its output stand in.
+        let mouse = target
+            .live
+            .as_ref()
+            .map_or_else(|| target.card.mouse.get(), |live| live.mouse());
+        if let Some(bytes) = taix_term::report(mouse, button, col, row, kind) {
             let _ = cmd::send_bytes(&self.tmux, pane, &bytes);
         }
     }
@@ -2904,6 +3149,59 @@ impl App {
             row.scroll = scroll;
             row.dirty = true;
             row.card.set_scroll(scroll);
+        }
+    }
+
+    /// Scroll to the previous (`delta < 0`) or next command the pane's shell
+    /// ran, past the last one back to the live bottom.
+    ///
+    /// ponytail: tmux keeps no record of where a prompt was, so each recorded
+    /// command is found again in the history text as the last line (above the
+    /// next one's) ending in what was typed. A command that wrapped over two
+    /// rows, or scrolled out of tmux's history, has no line and is skipped.
+    fn jump_prompt(&mut self, id: AgentId, delta: i32) {
+        let Some(row) = self.row(id) else { return };
+        let Some(pane) = row.agent.pane else { return };
+        let typed: Vec<&str> = row
+            .shell
+            .commands()
+            .map(|c| c.text.as_str())
+            .filter(|t| !t.is_empty())
+            .collect();
+        let Ok(text) = cmd::history_text(&self.tmux, pane) else {
+            return;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        let mut prompts = Vec::new();
+        let mut end = lines.len();
+        for t in typed.iter().rev() {
+            if let Some(i) = lines[..end].iter().rposition(|l| l.trim_end().ends_with(t)) {
+                prompts.push(i);
+                end = i;
+            }
+        }
+        prompts.reverse();
+        let history = cmd::history_size(&self.tmux, pane);
+        let third = pane_size(&self.tmux, pane).rows / 3;
+        // The line a third of the way down the view, which is where
+        // `scroll_to_line` puts the one it jumps to.
+        let at = (history + third).saturating_sub(row.scroll);
+        let target = if delta < 0 {
+            prompts.iter().rev().find(|&&l| l < at)
+        } else {
+            prompts.iter().find(|&&l| l > at)
+        };
+        match target {
+            Some(&line) => {
+                let scroll = (history + third).saturating_sub(line).min(history);
+                if let Some(row) = self.row_mut(id) {
+                    row.scroll = scroll;
+                    row.dirty = true;
+                    row.card.set_scroll(scroll);
+                }
+            }
+            None if delta > 0 => self.scroll_to_bottom(id),
+            None => {}
         }
     }
 
@@ -3364,6 +3662,35 @@ impl App {
     }
 }
 
+/// The http(s) URL covering character `col` of `line`, if any.
+// ponytail: columns counted as chars, so a wide glyph earlier on the line
+// shifts the hit; a cell-width map if that ever matters.
+fn url_at(line: &str, col: usize) -> Option<&str> {
+    let at = line.char_indices().nth(col)?.0;
+    let stop = |c: char| c.is_whitespace() || "\"'<>`".contains(c);
+    let start = line[..at].rfind(stop).map_or(0, |i| i + 1);
+    let end = line[at..].find(stop).map_or(line.len(), |i| at + i);
+    let word = &line[start..end];
+    let from = ["https://", "http://"]
+        .iter()
+        .filter_map(|p| word.find(p))
+        .min()?;
+    let url = word[from..].trim_end_matches(|c: char| ".,;:!?)]}".contains(c));
+    let begin = start + from;
+    (at >= begin && at < begin + url.len() && url.len() > 8).then_some(url)
+}
+
+#[test]
+fn url_at_finds_the_link_under_the_click() {
+    let line = "see (https://ex.com/a?b=1). or http://x.io";
+    assert_eq!(url_at(line, 10), Some("https://ex.com/a?b=1"));
+    assert_eq!(url_at(line, 4), None); // the paren
+    assert_eq!(url_at(line, 25), None); // trailing ")."
+    assert_eq!(url_at(line, 0), None);
+    assert_eq!(url_at(line, 40), Some("http://x.io"));
+    assert_eq!(url_at("é https://a.b", 3), Some("https://a.b"));
+}
+
 /// Colour a unified diff by line prefix.
 ///
 /// The two-column `compare` view diffs two *captures*; this is git's own
@@ -3420,6 +3747,25 @@ fn pane_size(tmux: &Client, pane: PaneId) -> Size {
             rows: p.rows.max(1),
         })
         .unwrap_or(Size { cols: 80, rows: 24 })
+}
+
+/// An emulator at the seed's grid, primed with its screen, cursor and modes.
+///
+/// A capture carries text and colour, never modes, so without tmux's own
+/// flags a pane running a TUI would believe nothing wanted the pointer. The
+/// alternate screen is entered first so the capture lands where the program
+/// drew it, and the emulator reports `alt_screen` from then on.
+fn primed(seed: &cmd::Seed) -> Live {
+    let mut live = Live::new(Size {
+        cols: seed.cols,
+        rows: seed.rows,
+    });
+    if seed.alt {
+        live.feed(b"\x1b[?1049h");
+    }
+    live.seed(&seed.screen, seed.cursor);
+    live.feed(&seed.modes);
+    live
 }
 
 /// Drives `App::tick` from the GTK main loop: one timer, re-armed after

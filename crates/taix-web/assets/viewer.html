@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex" />
+  <meta name="referrer" content="no-referrer" />
+  <title>TaiX · shared window</title>
+  <!-- Relative on purpose: the page lives at /s/<token>/, and only the
+       token's own paths answer for a visitor with no cookie. -->
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    html,
+    body {
+      overflow: auto;
+    }
+
+    body {
+      position: static;
+      min-height: 100%;
+      height: auto;
+    }
+
+    #v-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      background: var(--bg-head);
+      border-bottom: 1px solid var(--hairline);
+      position: sticky;
+      top: 0;
+    }
+
+    #v-name {
+      font-size: 14px;
+    }
+
+    #v-main {
+      flex: 1;
+      padding: 12px 14px;
+      background: var(--pane-bg);
+      overflow: auto;
+    }
+
+    #v-note {
+      margin: auto;
+      color: var(--dim);
+    }
+  </style>
+</head>
+
+<body>
+  <header id="v-head">
+    <span id="v-dot" class="dot"></span>
+    <b id="v-name">Connecting…</b>
+    <span id="v-state" class="mono dim"></span>
+    <span class="grow"></span>
+    <span class="chip">Read-only</span>
+    <span id="v-left" class="mono dim"></span>
+  </header>
+  <main id="v-main">
+    <pre id="v-screen" class="screen"></pre>
+  </main>
+  <script type="module" src="js/viewer.js"></script>
+</body>
+
+</html>

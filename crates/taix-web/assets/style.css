@@ -125,6 +125,32 @@ body {
   overscroll-behavior: none;
 }
 
+/* iOS 26 regression: an installed app reports the screen short by the top
+   safe-area inset and paints nothing below that line, so a band of the root
+   background sits under the dock whatever the page does (`100lvh` only
+   pushed the dock into it). The band already covers the home indicator:
+   `short`, set by `term.js`, gives the band the dock's colour so the two
+   read as one bar, and sits the buttons on the last painted line, as close
+   to the thumb as the page can reach. */
+html.short {
+  background: var(--bg-head);
+}
+
+html.short #dock {
+  height: 50px;
+  padding-bottom: 0;
+}
+
+html.short #bar {
+  height: 30px;
+  padding-bottom: 0;
+}
+
+html.short #dock button {
+  justify-content: flex-end;
+  padding-bottom: 2px;
+}
+
 button {
   font: inherit;
   color: inherit;
@@ -231,6 +257,7 @@ img.ico {
   border-radius: 9px;
   font-size: 12.5px;
   font-weight: 600;
+  white-space: nowrap;
   transition: background 140ms var(--ease);
 }
 
@@ -274,7 +301,7 @@ img.ico {
 }
 
 .chip.on,
-.on > .chip {
+.on>.chip {
   background: var(--accent-soft);
   border-color: var(--accent-line);
   color: var(--accent);
@@ -345,9 +372,11 @@ img.ico {
   0% {
     box-shadow: 0 0 0 0 rgba(216, 221, 227, 0.4);
   }
+
   70% {
     box-shadow: 0 0 0 6px rgba(216, 221, 227, 0);
   }
+
   100% {
     box-shadow: 0 0 0 0 rgba(216, 221, 227, 0);
   }
@@ -367,10 +396,12 @@ img.ico {
 }
 
 @keyframes pulse {
+
   0%,
   100% {
     opacity: 0.35;
   }
+
   50% {
     opacity: 1;
   }
@@ -403,8 +434,10 @@ img.ico {
   display: flex;
   align-items: center;
   gap: 12px;
-  height: 56px;
-  padding: 0 14px;
+  /* Installed on an iPad, the page runs under the status bar
+     (`black-translucent`); the insets are 0 everywhere else. */
+  height: calc(56px + env(safe-area-inset-top));
+  padding: env(safe-area-inset-top) max(14px, env(safe-area-inset-right)) 0 max(14px, env(safe-area-inset-left));
   background: var(--bg-head);
   border-bottom: 1px solid var(--hairline);
   flex: 0 0 auto;
@@ -614,8 +647,8 @@ img.ico {
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  width: var(--rail-w);
-  padding: 10px 0;
+  width: calc(var(--rail-w) + env(safe-area-inset-left));
+  padding: 10px 0 10px env(safe-area-inset-left);
   background: var(--bg-head);
   border-right: 1px solid var(--hairline);
   flex: 0 0 auto;
@@ -884,6 +917,7 @@ img.ico {
 
 /* A finger has no hover: the dots are simply there, big enough to hit. */
 @media (hover: none) {
+
   .proj-menu,
   .win-tools {
     opacity: 1;
@@ -907,6 +941,7 @@ img.ico {
   box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 60%, transparent);
   flex: 0 0 auto;
 }
+
 /* ===== window rows ===== */
 .win {
   display: flex;
@@ -1332,39 +1367,134 @@ img.ico {
   text-decoration: line-through;
 }
 
-/* Palette colours (standard 16) emitted as short classes to shrink SSE frames. */
-.screen .f0 { color: var(--term-0); }
-.screen .f1 { color: var(--term-1); }
-.screen .f2 { color: var(--term-2); }
-.screen .f3 { color: var(--term-3); }
-.screen .f4 { color: var(--term-4); }
-.screen .f5 { color: var(--term-5); }
-.screen .f6 { color: var(--term-6); }
-.screen .f7 { color: var(--term-7); }
-.screen .f8 { color: var(--term-8); }
-.screen .f9 { color: var(--term-9); }
-.screen .f10 { color: var(--term-10); }
-.screen .f11 { color: var(--term-11); }
-.screen .f12 { color: var(--term-12); }
-.screen .f13 { color: var(--term-13); }
-.screen .f14 { color: var(--term-14); }
-.screen .f15 { color: var(--term-15); }
-.screen .b0 { background: var(--term-0); }
-.screen .b1 { background: var(--term-1); }
-.screen .b2 { background: var(--term-2); }
-.screen .b3 { background: var(--term-3); }
-.screen .b4 { background: var(--term-4); }
-.screen .b5 { background: var(--term-5); }
-.screen .b6 { background: var(--term-6); }
-.screen .b7 { background: var(--term-7); }
-.screen .b8 { background: var(--term-8); }
-.screen .b9 { background: var(--term-9); }
-.screen .b10 { background: var(--term-10); }
-.screen .b11 { background: var(--term-11); }
-.screen .b12 { background: var(--term-12); }
-.screen .b13 { background: var(--term-13); }
-.screen .b14 { background: var(--term-14); }
-.screen .b15 { background: var(--term-15); }
+/* Palette colours (standard 16) emitted as short classes to shrink snapshot frames. */
+.screen .f0 {
+  color: var(--term-0);
+}
+
+.screen .f1 {
+  color: var(--term-1);
+}
+
+.screen .f2 {
+  color: var(--term-2);
+}
+
+.screen .f3 {
+  color: var(--term-3);
+}
+
+.screen .f4 {
+  color: var(--term-4);
+}
+
+.screen .f5 {
+  color: var(--term-5);
+}
+
+.screen .f6 {
+  color: var(--term-6);
+}
+
+.screen .f7 {
+  color: var(--term-7);
+}
+
+.screen .f8 {
+  color: var(--term-8);
+}
+
+.screen .f9 {
+  color: var(--term-9);
+}
+
+.screen .f10 {
+  color: var(--term-10);
+}
+
+.screen .f11 {
+  color: var(--term-11);
+}
+
+.screen .f12 {
+  color: var(--term-12);
+}
+
+.screen .f13 {
+  color: var(--term-13);
+}
+
+.screen .f14 {
+  color: var(--term-14);
+}
+
+.screen .f15 {
+  color: var(--term-15);
+}
+
+.screen .b0 {
+  background: var(--term-0);
+}
+
+.screen .b1 {
+  background: var(--term-1);
+}
+
+.screen .b2 {
+  background: var(--term-2);
+}
+
+.screen .b3 {
+  background: var(--term-3);
+}
+
+.screen .b4 {
+  background: var(--term-4);
+}
+
+.screen .b5 {
+  background: var(--term-5);
+}
+
+.screen .b6 {
+  background: var(--term-6);
+}
+
+.screen .b7 {
+  background: var(--term-7);
+}
+
+.screen .b8 {
+  background: var(--term-8);
+}
+
+.screen .b9 {
+  background: var(--term-9);
+}
+
+.screen .b10 {
+  background: var(--term-10);
+}
+
+.screen .b11 {
+  background: var(--term-11);
+}
+
+.screen .b12 {
+  background: var(--term-12);
+}
+
+.screen .b13 {
+  background: var(--term-13);
+}
+
+.screen .b14 {
+  background: var(--term-14);
+}
+
+.screen .b15 {
+  background: var(--term-15);
+}
 
 .screen .cur {
   background: var(--accent);
@@ -1376,6 +1506,19 @@ img.ico {
 .ghost {
   background: color-mix(in srgb, var(--accent) 20%, transparent);
   box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* Typed characters the pane has not echoed yet, drawn before the cursor.
+   Dim: they are a guess until the desktop's own row replaces them. */
+.predict {
+  opacity: 0.55;
+}
+
+/* A pane that is not the one typed into and has scrolled out of the stage
+   costs no layout or paint until it is back; `auto` keeps its last size. */
+.pane:not(.cur) .screen {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 30em;
 }
 
 #stage-empty {
@@ -1451,7 +1594,7 @@ img.ico {
   color: var(--dim-2);
 }
 
-.panel-label > .v {
+.panel-label>.v {
   letter-spacing: 0;
   text-transform: none;
   color: var(--fg);
@@ -1604,6 +1747,10 @@ img.ico {
   color: var(--dim);
 }
 
+.panel-section a {
+  color: var(--accent);
+}
+
 .field {
   display: flex;
   align-items: center;
@@ -1612,7 +1759,7 @@ img.ico {
   min-height: 40px;
 }
 
-.field > label {
+.field>label {
   color: var(--dim);
   font-size: 12.5px;
 }
@@ -1767,23 +1914,6 @@ img.ico {
   flex: 0 0 auto;
 }
 
-#claim {
-  display: flex;
-  gap: 8px;
-}
-
-#claim-go {
-  flex: 1;
-  height: 40px;
-  border-radius: 11px;
-  font-size: 13.5px;
-}
-
-#claim-read {
-  height: 40px;
-  border-radius: 11px;
-}
-
 /* An agent asking a question, answered without typing anything. */
 #prompt {
   padding: 12px 13px 13px;
@@ -1804,11 +1934,13 @@ img.ico {
 
 .prompt-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
 .prompt-btn {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 52px;
   height: 44px;
   border: 1px solid var(--border);
   border-radius: 11px;
@@ -1848,41 +1980,34 @@ img.ico {
   flex: 0 0 auto;
 }
 
+/* One row, scrolled sideways. It runs to the screen's edges so a key
+   half-cut by the edge says "there is more". */
 #keys {
   display: flex;
-  flex-direction: column;
   gap: 6px;
-}
-
-.krow {
-  display: flex;
-  gap: 6px;
-}
-
-.krow.scroll {
+  margin: 0 -14px;
+  padding: 0 14px;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
   scrollbar-width: none;
+  touch-action: pan-x;
 }
 
-.krow.scroll::-webkit-scrollbar {
+#keys::-webkit-scrollbar {
   display: none;
 }
 
 .key {
-  min-width: 39px;
-  height: 30px;
-  padding: 0 9px;
+  min-width: 42px;
+  height: 38px;
+  padding: 0 11px;
   background: var(--bg-alt);
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 9px;
   color: var(--dim);
   font-family: var(--code);
-  font-size: 11px;
+  font-size: 14px;
   flex: 0 0 auto;
-}
-
-.krow:not(.scroll) .key {
-  flex: 1;
 }
 
 .key:active,
@@ -1890,6 +2015,38 @@ img.ico {
   background: var(--accent-soft);
   border-color: var(--accent-line);
   color: var(--accent);
+}
+
+/* The typing mode, pinned at the row's start so it never scrolls away:
+   accent lines while buffered, a red bolt while keys go out live. */
+.key.mode {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: var(--accent);
+  border-color: var(--accent-line);
+  box-shadow: -14px 0 0 var(--bg), 6px 0 8px -4px var(--bg);
+}
+
+.key.mode .ico {
+  width: 18px;
+  height: 18px;
+}
+
+.key.mode.live {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 55%, transparent);
+  background: color-mix(in srgb, color-mix(in srgb, var(--red) 18%, black) 60%, var(--bg-alt));
+  box-shadow: -14px 0 0 var(--bg), 6px 0 8px -4px var(--bg), 0 0 10px -2px color-mix(in srgb, var(--red) 45%, transparent);
+}
+
+#input.live #entry,
+#input.live #sugg,
+#input.raw .key.mode {
+  display: none;
 }
 
 #entry {
@@ -1901,14 +2058,74 @@ img.ico {
 #entry-box {
   flex: 1;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 9px;
+  gap: 0 9px;
   min-height: 46px;
   padding: 0 13px;
   background: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: 13px;
   min-width: 0;
+}
+
+/* Files in the line, a row of chips over the text. */
+#entry-files {
+  flex: 1 0 100%;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-top: 9px;
+  scrollbar-width: none;
+}
+
+#entry-files[hidden] {
+  display: none;
+}
+
+.file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 190px;
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border: 1px solid var(--accent-line);
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 13px;
+}
+
+.file-chip .ico {
+  width: 16px;
+  height: 16px;
+  color: inherit;
+  flex: 0 0 auto;
+}
+
+.file-chip .num {
+  font-weight: 600;
+}
+
+.file-chip .stem {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-chip .ext {
+  flex: 0 0 auto;
+  color: var(--dim-2);
+}
+
+.sheet-preview {
+  display: block;
+  max-width: 100%;
+  max-height: 40vh;
+  margin: 4px auto 10px;
+  border-radius: 10px;
+  object-fit: contain;
 }
 
 #entry-box:focus-within {
@@ -1920,26 +2137,76 @@ img.ico {
   font-size: 13px;
 }
 
-#entry-text {
+/* A textarea cannot colour part of its text, so it is drawn transparent over
+   #entry-ink, a copy of its text with the file marks (①) in the accent. */
+#entry-field {
+  position: relative;
   flex: 1;
   min-width: 0;
-  max-height: 30vh;
+  display: flex;
+}
+
+#entry-text,
+#entry-ink {
   padding: 12px 0;
-  border: none;
-  background: none;
-  border-radius: 0;
-  resize: none;
   font-family: var(--code);
   /* 16px or Safari zooms the page the moment it takes focus. */
   font-size: 16px;
   line-height: 1.35;
 }
 
+#entry-text {
+  flex: 1;
+  min-width: 0;
+  max-height: 30vh;
+  border: none;
+  background: none;
+  border-radius: 0;
+  resize: none;
+  color: transparent;
+  caret-color: var(--fg);
+  position: relative;
+}
+
+#entry-ink {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  color: var(--fg);
+}
+
+#entry-ink .ref {
+  position: relative;
+  color: transparent;
+}
+
+#entry-ink .card {
+  position: absolute;
+  inset: 1px -1px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border-radius: 5px;
+  background: var(--tint);
+  color: var(--accent-ink);
+  font: 700 12px/1 var(--sans, sans-serif);
+}
+
+#entry-ink .card .ico {
+  width: 12px;
+  height: 12px;
+}
+
 #entry-text::placeholder {
   color: var(--faint);
 }
 
-#entry-add {
+#entry-add,
+#entry-mic {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1948,6 +2215,44 @@ img.ico {
   border-radius: 7px;
   color: var(--dim-2);
   flex: 0 0 auto;
+}
+
+#entry-mic[hidden] {
+  display: none;
+}
+
+#entry-mic.on {
+  color: var(--red);
+}
+
+/* Files this line already sent: one tap from being attached again. */
+.file-chip.sent {
+  opacity: 0.55;
+  color: var(--dim-2);
+}
+
+.sent-label {
+  align-self: center;
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.tray-thumb {
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 6px;
+}
+
+canvas.markup {
+  max-width: 100%;
+  max-height: 60vh;
+  object-fit: contain;
+  border-radius: 8px;
+  touch-action: none;
 }
 
 #entry-send {
@@ -1963,8 +2268,9 @@ img.ico {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 30px;
-  padding: 0 14px;
+  /* Clear of the home indicator, which an iPad has too. */
+  height: calc(30px + env(safe-area-inset-bottom));
+  padding: 0 max(14px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(14px, env(safe-area-inset-left));
   background: var(--bg-head);
   border-top: 1px solid var(--hairline);
   color: var(--dim-2);
@@ -2017,11 +2323,18 @@ img.ico {
   white-space: nowrap;
 }
 
+#bar-lag {
+  color: var(--dim-2);
+  white-space: nowrap;
+}
+
 /* ===== dock ===== */
 #dock {
   display: none;
   align-items: stretch;
-  height: 64px;
+  /* Border-box: the home-indicator inset comes on top of the buttons, not
+     out of them. */
+  height: calc(56px + env(safe-area-inset-bottom));
   padding: 0 6px;
   padding-bottom: env(safe-area-inset-bottom);
   background: var(--bg-head);
@@ -2189,6 +2502,13 @@ img.ico {
   padding: 8px;
   border: 1px solid var(--border-2);
   border-radius: 14px;
+  /* A popover, not a sheet: the sheet's upward 60px shadow and the dimmed
+     backdrop read as a dark box around it. */
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+#sheet:has(#sheet-card.anchored) {
+  background: transparent;
 }
 
 .sheet-grip {
@@ -2455,8 +2775,11 @@ body.dropped #body {
   pointer-events: none;
 }
 
-/* ===== desktop ===== */
-@media (min-width: 861px) {
+/* ===== desktop and tablet ===== */
+/* Everything that is not a phone (the inverse of the mobile query below,
+   and of `mobile()` in store.js): an iPad in portrait gets the columns. */
+@media (min-width: 701px) and (min-height: 501px),
+(min-width: 861px) {
   #crumb {
     display: none;
   }
@@ -2469,6 +2792,209 @@ body.dropped #body {
   #panel[hidden] {
     display: none;
   }
+
+  /* A sheet with nothing to anchor to is a card in the middle, not a
+     drawer the width of a 13-inch screen. */
+  #sheet {
+    align-items: center;
+    padding: 16px;
+  }
+
+  #sheet-card:not(.anchored) {
+    max-width: 440px;
+    padding-bottom: 10px;
+    border: 1px solid var(--border-2);
+    border-radius: 18px;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
+  }
+
+  #sheet-card:not(.anchored) .sheet-grip {
+    display: none;
+  }
+
+  /* Typing on a tablet's soft keyboard: the key row it lacks, and the
+     line of terminal every other row of chrome would cost. */
+  html.kb #stage-head {
+    display: none;
+  }
+
+  /* Two panes side by side in portrait are two 45-column slivers; stacked,
+     each keeps the full width. */
+  @media (orientation: portrait) {
+    #grid[data-layout="split"] {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: repeat(2, minmax(0, 1fr));
+    }
+  }
+}
+
+/* ===== tablet: the key row over the soft keyboard (`compose.js`) ===== */
+/* Shown only while the keyboard is up and the pane holds focus: with a
+   hardware keyboard the page never sees `kb`, and every key is real. */
+#input.raw {
+  padding: 8px 14px;
+}
+
+#input.raw #entry,
+#input.raw #sugg,
+#input.raw #prompt,
+html:not(.kb) #input.raw,
+body:not(:has(#sink:focus)) #input.raw {
+  display: none;
+}
+
+/* ===== tablet, compact ===== */
+/* Columns, but not room for the project list beside an 80-column pane:
+   an iPad in portrait, a Split View half. The list is a drawer over the
+   stage (`drawer()` in store.js) and a panel floats over its right edge. */
+@media (min-width: 701px) and (max-width: 1100px) and (min-height: 501px),
+(min-width: 861px) and (max-width: 1100px) {
+
+  #nav {
+    display: inline-flex;
+  }
+
+  #host,
+  #facts-top {
+    display: none;
+  }
+
+  #rail {
+    position: relative;
+    z-index: 31;
+  }
+
+  html.drawer #rail button[data-go="home"] {
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+
+  #side {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: calc(var(--rail-w) + env(safe-area-inset-left));
+    z-index: 30;
+    width: min(320px, calc(100% - var(--rail-w) - 56px));
+    box-shadow: 24px 0 60px rgba(0, 0, 0, 0.55);
+    transform: translateX(-110%);
+    visibility: hidden;
+    transition: transform 220ms var(--ease), visibility 0s 220ms;
+  }
+
+  html.drawer #side {
+    transform: none;
+    visibility: visible;
+    transition: transform 220ms var(--ease);
+  }
+
+  #stage::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    background: rgba(6, 9, 11, 0.55);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 220ms var(--ease);
+  }
+
+  html.drawer #stage::after {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  #panel {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 25;
+    width: min(400px, calc(100% - var(--rail-w) - 56px));
+    box-shadow: -24px 0 60px rgba(0, 0, 0, 0.55);
+  }
+}
+
+/* ===== tablet, touch ===== */
+/* A finger on a tablet gets the 44pt targets a phone's layout already
+   has; the columns stay. A trackpad-only laptop never matches. */
+@media (pointer: coarse) and (min-width: 701px) and (min-height: 501px),
+(pointer: coarse) and (min-width: 861px) {
+  :root {
+    --rail-w: 64px;
+  }
+
+  #rail {
+    gap: 8px;
+  }
+
+  #rail button,
+  #top .icon,
+  #add-project,
+  #panel-close {
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+  }
+
+  #omni,
+  #add,
+  #side-search {
+    height: 40px;
+  }
+
+  .tab {
+    height: 40px;
+    padding: 0 14px;
+  }
+
+  .tab.add {
+    width: 40px;
+  }
+
+  /* The close cross gets a finger-sized hit area without moving. */
+  .tab-x {
+    margin: -10px -10px -10px -4px;
+    padding: 10px;
+  }
+
+  #layout button {
+    height: 34px;
+    padding: 0 15px;
+  }
+
+  .pane-head {
+    height: 46px;
+  }
+
+  .pane-tool {
+    height: 34px;
+  }
+
+  .pane-tool.icon {
+    width: 34px;
+  }
+
+  .win {
+    min-height: 52px;
+  }
+
+  .chip-tab {
+    height: 36px;
+  }
+
+  #sheet-card.anchored {
+    width: 300px;
+  }
+
+  #sheet-card.anchored .sheet-item {
+    min-height: 44px;
+    font-size: 14px;
+  }
+
+  #bar-web {
+    height: 26px;
+  }
 }
 
 /* The status rail only earns its width when there is width to spare. */
@@ -2479,7 +3005,9 @@ body.dropped #body {
 }
 
 /* ===== mobile ===== */
-@media (max-width: 860px) {
+@media (max-width: 700px),
+(max-width: 860px) and (max-height: 500px) {
+
   #rail,
   #side-top,
   #layout,
@@ -2697,6 +3225,26 @@ body.dropped #body {
    has the same Focus/Split/Grid control a laptop has, so the choice is
    the reader's and there is nothing to guess here. */
 
+/* ===== key sink ===== */
+/* The desktop's keystroke pipe (`term.js`). It had no rule, so it sat in
+   the body's column as a 38px textarea under everything - the gap between
+   the line and a phone's keyboard. Out of flow and nearly transparent, not
+   hidden: a hidden field cannot hold focus. At the top, or iOS scrolls the
+   page to reveal it. 16px, or Safari zooms on focus. */
+#sink {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0.01;
+  resize: none;
+  font-size: 16px;
+  pointer-events: none;
+}
+
 /* ===== keyboard up ===== */
 /* iOS lays the keyboard over the page. `--kb` is how much it takes, set
    by `term.js` from `visualViewport`; everything that is not the pane and
@@ -2704,7 +3252,6 @@ body.dropped #body {
 html.kb #dock,
 html.kb #bar,
 html.kb #wins,
-html.kb #claim,
 html.kb #prompt {
   display: none;
 }
@@ -2713,18 +3260,56 @@ html.kb #input {
   padding-bottom: 4px;
 }
 
-/* Landscape with the keyboard up leaves a hundred pixels of terminal: the
-   second key row is the first thing to go. */
-html.kb.short .krow.scroll {
-  display: none;
+/* ===== phone landscape split ===== */
+/* Sideways, a phone has the width for two panes and no height to spare:
+   the tab strip and dock go (the key row and the line stay), and the
+   stage is cut in two. The ring marks the pane the composer types into;
+   `term.js` sizes and reports each pane's grid from its own box. */
+@media (max-width: 860px) and (orientation: landscape) and (max-height: 500px) {
+
+  #dock,
+  #wins {
+    display: none;
+  }
+
+  #grid[data-split] {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 1px;
+    background: var(--hairline);
+  }
+
+  #grid[data-split] .pane {
+    background: var(--bg);
+  }
+
+  #grid[data-split] .pane.cur {
+    box-shadow: inset 0 0 0 1px var(--accent-line);
+  }
 }
 
 /* ===== key row settings ===== */
-/* The settings toggles drop a whole group out of the second key row; the
-   `#` key in the first row is what shows or hides the row itself. */
+/* The settings toggles drop a whole group out of the key row. */
 html[data-keys-sym="off"] .key.sym,
 html[data-keys-ctl="off"] .key.ctl {
   display: none;
+}
+
+/* ===== custom keys ===== */
+/* Keys the user made sit in the row in the accent colour; the row also
+   takes a long press, so iOS must not offer to select or copy the label. */
+#keys .key {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.key.mine {
+  color: var(--accent);
+  border-color: var(--accent-line);
+}
+
+.key.add {
+  border-style: dashed;
 }
 
 /* Laid out by an id or a class, hidden by the attribute: an id beats the
@@ -2733,8 +3318,96 @@ html[data-keys-ctl="off"] .key.ctl {
   display: none !important;
 }
 
+/* ===== touch selection (`term.js`) ===== */
+/* A long press picks whole rows, drawn as a band over the output rather than
+   a native selection: iOS would pop its own callout over the top of ours. */
+@media (pointer: coarse) {
+
+  /* Holding space turns the iOS keyboard into a trackpad; with the page
+     selectable, its drag selected the whole page instead of moving the
+     caret in the line. Only fields and file/diff text select. */
+  body {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  input,
+  textarea,
+  .diff {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  .screen {
+    -webkit-touch-callout: none;
+  }
+}
+
+.select-mode .pane-body {
+  cursor: text;
+  user-select: text;
+}
+
+.sel-band {
+  position: absolute;
+  pointer-events: none;
+  background: rgba(122, 214, 190, 0.25);
+  border-radius: 3px;
+}
+
+.sel-bar {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  max-width: calc(100% - 16px);
+  background: var(--bg);
+  border: 1px solid var(--accent-line);
+  border-radius: 999px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+}
+
+.sel-bar button {
+  height: 32px;
+  padding: 0 11px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--accent);
+}
+
+/* A deep red pill drawn from the theme's own --red, set apart from the
+   actions by a little space: closing is not one of them. */
+.sel-bar .sel-close {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  margin-left: 4px;
+  padding: 0;
+  color: var(--red);
+  background: color-mix(in srgb, color-mix(in srgb, var(--red) 50%, black) 35%, var(--bg));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--red) 35%, transparent);
+  transition: background 0.12s;
+}
+
+.sel-bar .sel-close:hover,
+.sel-bar .sel-close:active {
+  background: color-mix(in srgb, color-mix(in srgb, var(--red) 50%, black) 60%, var(--bg));
+}
+
+.sel-bar .sel-close .ico {
+  width: 14px;
+  height: 14px;
+}
+
 /* ===== reduced motion ===== */
 @media (prefers-reduced-motion: reduce) {
+
   *,
   *::before,
   *::after {
@@ -2742,4 +3415,174 @@ html[data-keys-ctl="off"] .key.ctl {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* ===== Face ID lock screen (`lock.js`) ===== */
+/* Opaque and above everything: while the server has the device locked there
+   is nothing behind this worth seeing. */
+.lock {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--void);
+  color: var(--fg);
+}
+
+.lock-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding: 24px;
+  text-align: center;
+}
+
+.lock-card h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.lock-go {
+  min-width: 180px;
+  padding: 13px 24px;
+  font: inherit;
+  font-size: 16px;
+  color: var(--accent-ink);
+  background: var(--accent);
+  border: 0;
+  border-radius: 12px;
+}
+
+.lock-err {
+  min-height: 1.4em;
+  margin: 0;
+  color: var(--red);
+  font-size: 14px;
+}
+
+/* ===== reconnect banner and shortcut sheet (`hints.js`) ===== */
+#conn {
+  position: fixed;
+  top: calc(env(safe-area-inset-top) + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 61;
+  padding: 5px 12px;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+#keys-help {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 70;
+  display: grid;
+  gap: 8px;
+  min-width: 380px;
+  max-width: 90vw;
+  padding: 16px 20px;
+  background: var(--bg-raise);
+  border: 1px solid var(--border-2);
+  border-radius: 14px;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
+  font-size: 13px;
+  pointer-events: none;
+}
+
+#keys-help>div {
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+#keys-help kbd {
+  font-family: var(--code);
+  font-size: 12px;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+#keys-help span {
+  color: var(--dim);
+  text-align: right;
+}
+
+#conn[hidden],
+#keys-help[hidden] {
+  display: none;
+}
+
+/* ===== port preview ===== */
+/* Beside the terminal wherever the layout has columns; over everything on a
+   phone (same query as `mobile()` in store.js). */
+#preview {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-width: 0;
+  background: var(--bg);
+  border-left: 1px solid var(--hairline);
+}
+
+#preview-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 48px;
+  padding: 0 10px 0 16px;
+  border-bottom: 1px solid var(--hairline);
+  flex: 0 0 auto;
+}
+
+#preview-title {
+  font-family: var(--code);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  color: var(--dim-2);
+}
+
+#preview iframe {
+  flex: 1;
+  min-height: 0;
+  border: 0;
+  background: #fff;
+}
+
+.port-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.port-row b {
+  font-family: var(--code);
+  color: var(--accent);
+}
+
+a.chip {
+  text-decoration: none;
+}
+
+@media (max-width: 700px),
+(max-width: 860px) and (max-height: 500px) {
+  #preview {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    border-left: none;
+  }
+}
+
+#preview[hidden] {
+  display: none;
 }

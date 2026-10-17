@@ -53,3 +53,16 @@ kubeconfig
 /target/
 **/*.rs.bk
 *.pdb
+
+# Crash dumps can contain credentials and terminal contents.
+core
+core.[0-9]*
+*.core
+
+# Local publication drafts and scan reports.
+/.gitignore.new
+/README.new.md
+/inventory.json
+/findings.json
+/.gitleaks-history.json
+/.gitleaks-tree.json

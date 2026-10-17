@@ -1,6 +1,7 @@
 //! Widget construction and dialogs. No application logic lives here.
 
 use std::cell::RefCell;
+use std::path::Path;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -52,6 +53,8 @@ pub struct Widgets {
     pub pair: crate::web::Pair,
     /// Per-project cost, over the bar segment that totals it.
     pub perf: crate::perf::Perf,
+    /// Each window's processes and ports, over a bar segment and pane headers.
+    pub procs: crate::procs::Procs,
     /// Pane search. Hidden until asked for.
     pub find: crate::find::FindBar,
     pub stack: gtk::Stack,
@@ -134,6 +137,9 @@ pub struct AgentCard {
     /// slow cadence: it reads `/proc`, and a header is not worth a syscall
     /// storm per frame.
     pub mem_label: gtk::Label,
+    /// The ports this window's processes listen on, else how many it runs.
+    /// Hovering it opens the process monitor for this window.
+    pub procs_label: gtk::Label,
     /// Lit while a browser is typing into this window. A label, not an
     /// icon: GTK does not recolour the bundled SVGs from CSS, and this mark
     /// has to read as a state, not as decoration.
@@ -158,6 +164,9 @@ pub struct AgentCard {
     /// The body area. Held so a browser window can put a web view where the
     /// terminal text would be.
     stage: gtk::Overlay,
+    /// Files pasted or dropped into the current line, as chips along the
+    /// bottom of the body. Filled by `set_files`.
+    pub files: gtk::Box,
 }
 
 impl AgentCard {
@@ -185,6 +194,11 @@ impl AgentCard {
             .set_text(&kib.map(taix_core::mem::human_kib).unwrap_or_default());
     }
 
+    /// Ports as `:5173 +1`, or `N procs` under a pane that serves nothing.
+    pub fn set_procs(&self, ports: &[u16], children: usize) {
+        crate::procs::chip(&self.procs_label, ports, children);
+    }
+
     /// Preview a drop: `None` clears it.
     pub fn show_drop(&self, side: Option<crate::tree::Side>) {
         use crate::tree::Side;
@@ -206,6 +220,155 @@ impl AgentCard {
             if v == Fill { -1 } else { hgt.max(1) },
         );
     }
+
+    /// Show the files in this pane's line as chips: `(path, removable)`.
+    /// `remove` is told a chip's index when its Remove is pressed.
+    pub fn set_files(&self, files: &[(&Path, bool)], remove: impl Fn(usize) + Clone + 'static) {
+        while let Some(chip) = self.files.first_child() {
+            self.files.remove(&chip);
+        }
+        self.files.set_visible(!files.is_empty());
+        for (i, &(path, removable)) in files.iter().enumerate() {
+            let remove = remove.clone();
+            self.files
+                .append(&file_chip(i + 1, path, removable, move || remove(i)));
+        }
+    }
+}
+
+/// One file in a pane's line: its icon and name, the path on hover, and on
+/// click a popover with a preview, the full path to copy and Remove.
+fn file_chip(
+    n: usize,
+    path: &Path,
+    removable: bool,
+    remove: impl Fn() + 'static,
+) -> gtk::MenuButton {
+    let image = is_image(path);
+    let face = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    face.append(&gtk::Image::from_icon_name(if image {
+        "image-x-generic-symbolic"
+    } else {
+        "text-x-generic-symbolic"
+    }));
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    face.append(
+        &gtk::Label::builder()
+            .label(format!(
+                "<b>{}</b> {}",
+                n,
+                gtk::glib::markup_escape_text(&name)
+            ))
+            .use_markup(true)
+            .ellipsize(gtk::pango::EllipsizeMode::Middle)
+            .max_width_chars(28)
+            .build(),
+    );
+
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    body.add_css_class("file-pop");
+    let full = path.display().to_string();
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    row.append(
+        &gtk::Label::builder()
+            .label(&full)
+            .selectable(true)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::Char)
+            .max_width_chars(40)
+            .xalign(0.0)
+            .hexpand(true)
+            .css_classes(["mono", "file-path"])
+            .build(),
+    );
+    let copy = gtk::Button::builder()
+        .icon_name("edit-copy-symbolic")
+        .tooltip_text("Copy path")
+        .valign(gtk::Align::Start)
+        .css_classes(["flat"])
+        .build();
+    copy.connect_clicked(move |b| b.clipboard().set_text(&full));
+    row.append(&copy);
+    body.append(&row);
+    let drop = gtk::Button::builder()
+        .label("Remove")
+        .sensitive(removable)
+        .css_classes(["destructive-action"])
+        .build();
+    if !removable {
+        // Removing means backspacing it off the line, which is only safe
+        // while it is still the last thing typed.
+        drop.set_tooltip_text(Some("Typed after it - delete it from the line"));
+    }
+    body.append(&drop);
+    let popover = gtk::Popover::builder().child(&body).build();
+    if image {
+        // Decoded on first open, not per repaint: the chips are rebuilt on
+        // every keystroke after an attach, and a phone photo is 12MP.
+        let path = path.to_path_buf();
+        let done = std::cell::Cell::new(false);
+        popover.connect_show(move |_| {
+            if done.replace(true) {
+                return;
+            }
+            let Ok(texture) = gtk::gdk::Texture::from_filename(&path) else {
+                return;
+            };
+            // Drawn at its fitted size: a `GtkPicture` of the texture itself
+            // asks for the image's own size, and the popover grew to it.
+            let (w, h) = (texture.width() as f32, texture.height() as f32);
+            let scale = (300.0 / w).min(220.0 / h).min(1.0);
+            let size = gtk::graphene::Size::new(w * scale, h * scale);
+            let snapshot = gtk::Snapshot::new();
+            snapshot.append_texture(
+                &texture,
+                &gtk::graphene::Rect::new(0.0, 0.0, size.width(), size.height()),
+            );
+            if let Some(paintable) = snapshot.to_paintable(Some(&size)) {
+                body.prepend(&gtk::Picture::for_paintable(&paintable));
+            }
+        });
+    }
+    drop.connect_clicked({
+        let popover = popover.clone();
+        move |_| {
+            popover.popdown();
+            remove();
+        }
+    });
+    gtk::MenuButton::builder()
+        .child(&face)
+        .popover(&popover)
+        .tooltip_text(path.display().to_string())
+        .can_focus(false)
+        .css_classes(["pane-file", &tint_class(n)])
+        .build()
+}
+
+/// `tint-N`: the class that paints a chip in file N's colour. GTK has no
+/// inline style, so each N gets its rule once, the first time it is used.
+fn tint_class(n: usize) -> String {
+    thread_local!(static DONE: std::cell::RefCell<std::collections::HashSet<usize>> = Default::default());
+    let class = format!("tint-{n}");
+    if DONE.with(|done| done.borrow_mut().insert(n)) {
+        let c = crate::keys::tint(n);
+        let css = gtk::CssProvider::new();
+        css.load_from_string(&format!(
+            ".pane-file.{class} > button {{ color: {c}; border-color: alpha({c}, 0.45); \
+             background-image: linear-gradient(to bottom, alpha({c}, 0.18), alpha({c}, 0.07)); }} \
+             .pane-file.{class} > button:hover {{ border-color: {c}; }} \
+             .pane-file.{class} > button label {{ color: {c}; }}"
+        ));
+        if let Some(display) = gtk::gdk::Display::default() {
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &css,
+                // Above theme.rs's PRIORITY_TAIX, whose `.pane-file` it tints.
+                gtk::STYLE_PROVIDER_PRIORITY_USER + 55,
+            );
+        }
+    }
+    class
 }
 
 impl AgentCard {
@@ -360,6 +523,13 @@ pub fn agent_card(agent: &Agent, cfg: &taix_core::Config) -> AgentCard {
     let git_label = meta_label("pane-git", "Worktree branch and changes");
     let scroll_label = meta_label("pane-scroll", "Scrolled back — press End or type to return");
     let mem_label = meta_label("pane-mem", "Resident memory of this window's processes");
+    // No tooltip: hovering it opens the process monitor instead.
+    let procs_label = gtk::Label::builder()
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .width_chars(1)
+        .css_classes(["pane-procs", "mono"])
+        .valign(gtk::Align::Center)
+        .build();
 
     // The web front end's mark, on the pane itself: the sidebar says which
     // terminal is being driven, and this says it on the screen you are
@@ -382,6 +552,7 @@ pub fn agent_card(agent: &Agent, cfg: &taix_core::Config) -> AgentCard {
     head.append(&scroll_label);
     head.append(&git_label);
     head.append(&mem_label);
+    head.append(&procs_label);
     head.append(&remote);
     head.append(&badge);
     head.append(&menu);
@@ -494,6 +665,14 @@ pub fn agent_card(agent: &Agent, cfg: &taix_core::Config) -> AgentCard {
     stage.add_overlay(&start);
     stage.add_overlay(&jump);
     stage.add_overlay(&hint);
+    let files = gtk::Box::builder()
+        .spacing(6)
+        .visible(false)
+        .halign(gtk::Align::Start)
+        .valign(gtk::Align::End)
+        .css_classes(["pane-files"])
+        .build();
+    stage.add_overlay(&files);
     stage.set_hexpand(true);
     stage.set_vexpand(true);
 
@@ -532,6 +711,7 @@ pub fn agent_card(agent: &Agent, cfg: &taix_core::Config) -> AgentCard {
         git_label,
         scroll_label,
         mem_label,
+        procs_label,
         remote,
         jump,
         close,
@@ -540,6 +720,7 @@ pub fn agent_card(agent: &Agent, cfg: &taix_core::Config) -> AgentCard {
         start_label,
         hint,
         stage,
+        files,
         mouse: Rc::default(),
     };
     let tint = agent
@@ -1139,6 +1320,18 @@ pub fn build(app: &adw::Application, cfg: &Config) -> Widgets {
         None => bar.clone().upcast(),
     };
     let perf = crate::perf::Perf::new(&perf_anchor);
+    // Processes and servers, at the right end beside the figures they
+    // are the breakdown of.
+    let procs = crate::procs::Procs::new();
+    if facts > 0 {
+        bar.append(
+            &gtk::Label::builder()
+                .label("│")
+                .css_classes(["bar-sep", "mono"])
+                .build(),
+        );
+    }
+    bar.append(&procs.button);
 
     // The glass: header, body, bar inside one rounded frame over the glows.
     let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -1183,6 +1376,7 @@ pub fn build(app: &adw::Application, cfg: &Config) -> Widgets {
         web,
         pair,
         perf,
+        procs,
         find,
         stack,
         empty,
@@ -1379,6 +1573,8 @@ pub struct SidebarCard {
     /// Opens a plain terminal in it.
     pub new_terminal: gtk::Button,
     pub count: gtk::Label,
+    /// Its windows' ports or process count; hovering it opens them.
+    pub procs: gtk::Label,
     pub attention: gtk::Label,
     /// Shown on a folded project when a browser is driving one of its
     /// terminals: the row that would have said so is not on screen.
@@ -1402,6 +1598,8 @@ pub struct SidebarRow {
     pub remote: gtk::Label,
     /// The state's name, uppercase, in its colour.
     pub state: gtk::Label,
+    /// Its ports or process count; hovering it opens its tree.
+    pub procs: gtk::Label,
 }
 
 /// Menu model for a project. Actions resolve against the `project` group the
@@ -1474,6 +1672,7 @@ fn app_menu() -> gtk::gio::Menu {
 
     let prefs = gtk::gio::Menu::new();
     prefs.append(Some("Automation…"), Some("taix.automation"));
+    prefs.append(Some("Recent attachments…"), Some("taix.attachments"));
     prefs.append(Some("Settings…"), Some("taix.settings"));
     menu.append_section(None, &prefs);
     menu
@@ -1498,6 +1697,7 @@ fn window_menu(has_worktree: bool) -> gtk::gio::Menu {
     clip.append(Some("Select all"), Some("win.select-all"));
     clip.append(Some("Copy"), Some("win.copy"));
     clip.append(Some("Paste"), Some("win.paste"));
+    clip.append(Some("Attach selection"), Some("win.attach-selection"));
     menu.append_section(None, &clip);
 
     let run = gtk::gio::Menu::new();
@@ -1534,6 +1734,7 @@ fn body_menu() -> gtk::gio::Menu {
     clip.append(Some("Copy"), Some("win.copy"));
     clip.append(Some("Paste"), Some("win.paste"));
     clip.append(Some("Select all"), Some("win.select-all"));
+    clip.append(Some("Attach selection"), Some("win.attach-selection"));
     menu.append_section(None, &clip);
     let run = gtk::gio::Menu::new();
     run.append(Some("Interrupt (Ctrl-C)"), Some("win.interrupt"));
@@ -1611,11 +1812,18 @@ pub fn sidebar_card(
         .css_classes(["count", "mono"])
         .valign(gtk::Align::Center)
         .build();
+    let procs = procs_chip();
     let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    head.append(&fold);
+    // The caret's place in the row; the button itself floats above the
+    // project button (see below), because a button nested inside another
+    // never gets the click.
+    let caret_gap = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    caret_gap.set_size_request(14, -1);
+    head.append(&caret_gap);
     head.append(&folder);
     head.append(&titles);
     head.append(&remote);
+    head.append(&procs);
     head.append(&attention);
     head.append(&count);
     let select = gtk::Button::builder()
@@ -1638,8 +1846,13 @@ pub fn sidebar_card(
         }
     });
 
+    fold.set_halign(gtk::Align::Start);
+    fold.set_margin_start(8);
+    let face = gtk::Overlay::builder().child(&select).build();
+    face.add_overlay(&fold);
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    header.append(&select);
+    header.add_css_class("project-header");
+    header.append(&face);
     header.append(&menu);
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 2);
@@ -1698,9 +1911,11 @@ pub fn sidebar_card(
             .visible(false)
             .tooltip_text("A browser is typing into this terminal")
             .build();
+        let row_procs = procs_chip();
         let line = gtk::Box::new(gtk::Orientation::Horizontal, 9);
         line.append(&dot);
         line.append(&label);
+        line.append(&row_procs);
         line.append(&row_remote);
         line.append(&state);
         let open = gtk::Button::builder()
@@ -1743,6 +1958,7 @@ pub fn sidebar_card(
             label,
             remote: row_remote,
             state,
+            procs: row_procs,
         });
     }
 
@@ -1766,11 +1982,22 @@ pub fn sidebar_card(
         fold_icon,
         new_terminal,
         count,
+        procs,
         attention,
         remote,
         body,
         windows: rows,
     }
+}
+
+/// The sidebar's anchor for the process monitor, empty until the first
+/// reading fills it.
+fn procs_chip() -> gtk::Label {
+    gtk::Label::builder()
+        .css_classes(["row-procs", "mono"])
+        .valign(gtk::Align::Center)
+        .visible(false)
+        .build()
 }
 
 impl SidebarCard {
@@ -2173,4 +2400,107 @@ pub fn confirm_remove_project(
         dialog.close();
     });
     dialog.present();
+}
+
+fn is_image(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]
+            .contains(&e.to_ascii_lowercase().as_str())
+    })
+}
+
+/// Files already in the stash, newest first, so one can go on a line again
+/// without pasting it twice. A click on a row picks it and closes the dialog.
+pub fn recent_attachments(
+    parent: &adw::ApplicationWindow,
+    files: &[(std::path::PathBuf, u64, std::time::SystemTime)],
+    pick: impl Fn(std::path::PathBuf) + 'static,
+) {
+    let dialog = adw::Dialog::builder()
+        .title("Recent attachments")
+        .content_width(460)
+        .content_height(420)
+        .build();
+    if files.is_empty() {
+        dialog.set_child(Some(
+            &gtk::Label::builder()
+                .label("Nothing attached yet. Pasted or dropped files show up here.")
+                .wrap(true)
+                .css_classes(["dim-label"])
+                .margin_top(24)
+                .margin_bottom(24)
+                .margin_start(24)
+                .margin_end(24)
+                .build(),
+        ));
+        dialog.present(Some(parent));
+        return;
+    }
+    let list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    let now = std::time::SystemTime::now();
+    for (path, size, modified) in files {
+        let secs = now.duration_since(*modified).map_or(0, |d| d.as_secs());
+        let age = if secs < 60 {
+            "just now".to_string()
+        } else {
+            format!("{} ago", taix_core::text::human_secs(secs))
+        };
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.set_margin_top(8);
+        row.set_margin_bottom(8);
+        row.set_margin_start(12);
+        row.set_margin_end(12);
+        row.append(&gtk::Image::from_icon_name(if is_image(path) {
+            "image-x-generic-symbolic"
+        } else {
+            "text-x-generic-symbolic"
+        }));
+        row.append(
+            &gtk::Label::builder()
+                .label(path.file_name().unwrap_or_default().to_string_lossy())
+                .ellipsize(gtk::pango::EllipsizeMode::Middle)
+                .xalign(0.0)
+                .hexpand(true)
+                .build(),
+        );
+        row.append(
+            &gtk::Label::builder()
+                .label(format!(
+                    "{} · {age}",
+                    taix_core::mem::human_kib(size.div_ceil(1024))
+                ))
+                .css_classes(["dim-label"])
+                .build(),
+        );
+        list.append(
+            &gtk::ListBoxRow::builder()
+                .child(&row)
+                .tooltip_text(path.display().to_string())
+                .build(),
+        );
+    }
+    let paths: Vec<_> = files.iter().map(|(p, ..)| p.clone()).collect();
+    list.connect_row_activated({
+        let dialog = dialog.clone();
+        move |_, row| {
+            if let Some(path) = usize::try_from(row.index()).ok().and_then(|i| paths.get(i)) {
+                pick(path.clone());
+            }
+            dialog.close();
+        }
+    });
+    dialog.set_child(Some(
+        &gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .child(&list)
+            .build(),
+    ));
+    dialog.present(Some(parent));
 }

@@ -1,0 +1,24 @@
+# TaiX with no display: a headless sway hosts the window, the web page on
+# :4040 is the way in. The tmux server lives in taix-tmux.service, so a
+# restart here keeps every terminal and agent.
+[Unit]
+Description=TaiX (headless, web on :4040)
+After=network-online.target taix-tmux.service
+Wants=network-online.target
+Requires=taix-tmux.service
+
+[Service]
+Environment=XDG_RUNTIME_DIR=/run/taix
+Environment=WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1
+Environment=LANG=C.UTF-8 SHELL=/usr/bin/zsh HOME=/root
+Environment=WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+RuntimeDirectory=taix
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+WorkingDirectory=/root
+ExecStart=/usr/bin/sway -c /etc/taix/sway.conf
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -424,7 +424,7 @@ splitbutton.new-terminal > menubutton > button:hover { background: alpha(@taix_a
 /* A project is a group: caret, folder, name over path, count. */
 .project-card { background: transparent; border-radius: 7px; }
 .project-head { padding: 6px 8px; border-radius: 7px; min-height: 0; }
-.project-head:hover { background: alpha(@taix_fg, 0.05); }
+.project-header:hover .project-head { background: alpha(@taix_fg, 0.05); }
 .project-card.selected .project-head { background: alpha(@taix_fg, 0.035); }
 /* Where a dragged project would land. A straight bar across the full width
    of the list, square-ended, with a short glow falling away from it into
@@ -473,7 +473,7 @@ splitbutton.new-terminal > menubutton > button:hover { background: alpha(@taix_a
 /* The card being carried: still there, clearly lifted out of the list. */
 .project-card.dragging { opacity: 0.3; }
 .project-caret { color: mix(@taix_dim, @taix_fg, 0.45); -gtk-icon-size: 12px; }
-.project-head:hover .project-caret { color: @taix_fg; }
+.project-header:hover .project-caret { color: @taix_fg; }
 .project-folder { color: mix(@taix_dim, @taix_fg, 0.35); -gtk-icon-size: 15px; }
 .project-name { font-size: 11.5px; font-weight: 500; color: mix(@taix_fg, white, 0.3); }
 .project-path { font-size: 9px; color: mix(@taix_dim, @taix_bg, 0.3); }
@@ -674,10 +674,25 @@ entry.files-search:focus-within {
 .agent-head:hover .pane-close { opacity: 1; }
 .pane-menu:hover { color: @taix_fg; opacity: 1; }
 .pane-close:hover { color: @taix_failed; opacity: 1; }
-/* Sidebar rows carry no controls at all: a 262px column cannot spare 40px a
-   row, and revealing them on hover reflowed the name under the pointer. The
-   menu button still exists for right-click to anchor its popover on. */
-.row-menu, .window-close {
+/* Sidebar menus are always there, dim until their row is hovered. The
+   space is allocated either way, so hovering never reflows the name. */
+.row-menu {
+  padding: 0;
+  margin: 0 2px;
+  min-height: 22px;
+  min-width: 22px;
+  color: @taix_dim;
+  opacity: 0.4;
+  -gtk-icon-size: 13px;
+}
+.row-menu > button { padding: 0; min-height: 22px; min-width: 22px; border-radius: 6px; }
+.window-line:hover > .row-menu,
+.project-header:hover > .row-menu { opacity: 1; }
+.row-menu:hover { color: @taix_fg; opacity: 1; }
+.row-menu:hover > button { background: alpha(@taix_fg, 0.08); }
+/* Close stays out of the sidebar: a 262px column cannot spare it, and the
+   menu has it. The button exists only for the old click wiring. */
+.window-close {
   padding: 0;
   margin: 0;
   min-height: 0;
@@ -1072,6 +1087,8 @@ button.git-tool.git-more { min-width: 22px; padding: 0 4px; }
 .pane-git { font-size: 9.5px; color: @taix_accent; }
 .pane-scroll { font-size: 9.5px; color: @taix_waiting; font-weight: 500; }
 .pane-mem { font-size: 9.5px; color: mix(@taix_dim, @taix_fg, 0.3); }
+.pane-procs { font-size: 9.5px; color: mix(@taix_dim, @taix_bg, 0.2); }
+.pane-procs.live { color: @taix_accent; font-weight: 500; }
 
 /* Where a dragged header will land: the half it takes, or the whole pane
    for a swap. An accent wash with an inset edge, so it reads over any output. */
@@ -1395,6 +1412,89 @@ label.perf-mem { color: mix(@taix_dim, @taix_fg, 0.45); }
 .perf-cost { font-size: 10px; color: mix(@taix_dim, @taix_fg, 0.3); }
 .perf-facts { font-size: 9px; color: mix(@taix_dim, @taix_bg, 0.25); }
 
+/* Process monitor ------------------------------------------------------
+
+   The perf monitor's panel, with a tree in it. The bar segment's dot
+   breathes while something is serving, so a dev server an agent started
+   is noticed without reading the pane it scrolled out of. */
+.bar-procs label { color: @taix_dim; }
+.bar-procs:hover label { color: mix(@taix_dim, @taix_fg, 0.55); }
+.bar-procs .procs-dot { font-size: 8px; }
+.bar-procs.live label { color: mix(@taix_accent, @taix_fg, 0.3); }
+.bar-procs.live .procs-dot {
+  color: @taix_accent;
+  animation: procs-breathe 2.4s ease-in-out infinite;
+}
+@keyframes procs-breathe {
+  from { opacity: 1; }
+  50% { opacity: 0.35; }
+  to { opacity: 1; }
+}
+/* Readable first: the port is the largest thing on a server line, the
+   program the brightest thing on a process line, and pids and guides the
+   quietest. Each window is a card so a long list still reads in blocks. */
+.procs-head { padding: 12px 16px 10px; border-bottom: 1px solid @taix_hairline; }
+.procs-title { font-size: 14px; font-weight: 600; color: mix(@taix_fg, white, 0.3); }
+.procs-count { font-size: 11px; color: @taix_dim; }
+.procs-list { padding: 4px 10px 10px; }
+.procs-eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: @taix_dim;
+  padding: 12px 6px 6px;
+}
+.procs-eyebrow.procs-on { color: mix(@taix_accent, @taix_fg, 0.35); }
+.procs-server { padding: 5px 8px; border-radius: 8px; min-height: 30px; }
+.procs-server:hover { background: alpha(@taix_fg, 0.05); }
+.procs-server button.procs-port { font-size: 13px; min-width: 64px; }
+.procs-where { font-size: 11px; color: @taix_dim; }
+.procs-reach { font-size: 10px; padding: 1px 7px; border-radius: 999px; }
+.procs-reach.local { color: @taix_dim; background: alpha(@taix_fg, 0.06); }
+.procs-reach.network { color: @taix_waiting; background: alpha(@taix_waiting, 0.14); }
+.procs-window {
+  margin-top: 6px;
+  padding: 4px 4px 6px;
+  border-radius: 10px;
+  background: alpha(@taix_fg, 0.035);
+  border: 1px solid alpha(@taix_fg, 0.05);
+}
+.procs-window-head { padding: 4px 6px 4px; }
+.procs-window-name { font-size: 12.5px; font-weight: 600; color: @taix_fg; }
+.procs-line { padding: 2px 6px; border-radius: 6px; min-height: 24px; }
+.procs-line:hover { background: alpha(@taix_fg, 0.06); }
+.procs-guide { font-size: 12px; color: alpha(@taix_fg, 0.22); }
+.procs-name { font-size: 12px; font-weight: 500; color: mix(@taix_fg, white, 0.15); }
+.procs-cmd { font-size: 11px; color: mix(@taix_dim, @taix_fg, 0.2); }
+.procs-pid { font-size: 10px; color: mix(@taix_dim, @taix_bg, 0.25); }
+button.procs-port {
+  min-height: 0;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: @taix_accent;
+  background: alpha(@taix_accent, 0.12);
+  border: 1px solid alpha(@taix_accent, 0.35);
+}
+button.procs-port:hover { background: alpha(@taix_accent, 0.24); }
+/* The sidebar's anchors: a quiet count, or the ports as an accent pill. */
+.row-procs {
+  font-size: 9.5px;
+  color: mix(@taix_dim, @taix_bg, 0.2);
+  padding: 1px 5px;
+  border-radius: 999px;
+}
+.row-procs:hover { color: @taix_fg; background: alpha(@taix_fg, 0.08); }
+.row-procs.live {
+  color: @taix_accent;
+  font-weight: 600;
+  background: alpha(@taix_accent, 0.12);
+  border: 1px solid alpha(@taix_accent, 0.3);
+}
+.row-procs.live:hover { background: alpha(@taix_accent, 0.24); }
+
 /* Empty state ---------------------------------------------------------- */
 
 statuspage .icon { color: @taix_dim; -gtk-icon-size: 48px; }
@@ -1481,6 +1581,23 @@ statuspage .description { font-size: 12px; color: @taix_dim; }
     inset 0 2px 5px alpha(black, 0.3),
     0 0 12px alpha(@taix_accent, 0.45);
 }
+
+/* Files pasted into the line: chips along the bottom-left of the pane. */
+.pane-files { margin: 0 0 12px 14px; }
+.pane-file > button {
+  min-height: 0;
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  border: 1px solid alpha(@taix_accent, 0.4);
+  background-color: alpha(@taix_bg, 0.85);
+  background-image: linear-gradient(to bottom, alpha(@taix_accent, 0.16), alpha(@taix_accent, 0.06));
+  box-shadow: 0 3px 10px alpha(black, 0.45);
+}
+.pane-file > button:hover { border-color: @taix_accent; }
+.pane-file image { color: inherit; }
+.file-pop { padding: 6px; }
+.file-path { font-size: 11px; }
 
 /* Find bar: one row under the panes, in the pane's own font so a match reads
    like the text it came from. */

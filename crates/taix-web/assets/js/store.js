@@ -32,8 +32,6 @@ export const state = {
   layout: localStorage.getItem('taix-layout') || 'focus',
   /** Local selected project (page-local navigation). */
   selected: null,
-  /** Local folded projects (Set of ids). */
-  folded: new Set(),
   /** Local zoomed window (page-local zoom). */
   zoomed: null,
   /**
@@ -51,8 +49,22 @@ export const state = {
 /** Per page load identifier for watch commands. */
 export const client = Math.random().toString(36).slice(2);
 
-/** Projects we've seen, to seed folded state from snapshot on first encounter. */
-const seenProjects = new Set();
+/**
+ * This browser's id on the server: kept across reloads, so the hub can tell
+ * which device holds a terminal, name it, and hand a window to it.
+ */
+export const device = (() => {
+  try {
+    let id = localStorage.getItem('taix-device');
+    if (!id) {
+      id = Math.random().toString(36).slice(2, 12) + Math.random().toString(36).slice(2, 12);
+      localStorage.setItem('taix-device', id);
+    }
+    return id;
+  } catch {
+    return client;
+  }
+})();
 
 const subscribers = [];
 const panelSubscribers = [];
@@ -102,6 +114,30 @@ export function emit() {
       console.error(e);
     }
   }
+}
+
+/**
+ * Handlers that run `fn` on the press for a mouse or pen, so the screen
+ * answers before the button comes back up, and on `click` for everything
+ * else: a finger may be starting a scroll, and the keyboard's Enter and
+ * Space only ever click. A click that follows a press already acted on is
+ * swallowed. Spread into `h()` props, or hand both to addEventListener.
+ * `early(e)` can keep a press from acting when only some targets should.
+ */
+export function tap(fn, early = () => true) {
+  let pressed = false;
+  return {
+    onpointerdown(e) {
+      pressed = e.button === 0 && e.pointerType !== 'touch' && early(e);
+      if (pressed) fn(e);
+    },
+    onclick(e) {
+      const acted = pressed && e.detail > 0;
+      pressed = false;
+      if (acted) e.stopPropagation();
+      else fn(e);
+    },
+  };
 }
 
 export const el = (id) => document.getElementById(id);
@@ -164,39 +200,100 @@ function remember() {
   if (hash && hash !== location.hash) history.replaceState(null, '', hash);
 }
 
-/** Take one snapshot: seed this page's navigation, adopt what it asked for. */
-export function arrive(snap) {
-  // Sparse frame: merge changed panes into held state
-  if (snap.pane_ids && state.snap) {
-    const held = new Map(state.snap.panes.map((p) => [p.id, p]));
-    const incoming = new Map(snap.panes.map((p) => [p.id, p]));
-    const merged = [];
-    for (const id of snap.pane_ids) {
-      const pane = incoming.get(id) || held.get(id);
-      if (pane) merged.push(pane);
+// The span attributes this socket has been told about, by index; 0 is plain
+// text. The table belongs to one socket, so a new one starts it over.
+let styles = [''];
+
+export function resetStyles() {
+  styles = [''];
+}
+
+/** Time of the first key sent to a window that the screen has not answered yet. */
+const typed = new Map();
+
+/** Round trip to the desktop and key-to-screen time, in ms; null until measured. */
+export const lag = { rtt: null, echo: null };
+
+const escape = (text) => text.replace(/[&<>]/g, (c) => (c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;'));
+
+/** A row of runs as HTML: plain text bare, styled text in a span. */
+const decode = (row) =>
+  row.map((run) => (typeof run === 'string' ? escape(run) : `<span${styles[run[0]]}>${escape(run[1])}</span>`)).join('');
+
+/**
+ * Take one message from the socket: the head sections that changed, new
+ * styles, and rows of the watched panes. A pane is `lines` whole, or `n`
+ * rows - after dropping `shift` scrolled-off ones - of which `edit` holds
+ * the changed ones; a row nobody touched keeps its string, so the terminal
+ * can tell what to repaint by identity.
+ */
+export function arrive(msg) {
+  for (const [i, attrs] of msg.styles || []) styles[i] = attrs;
+  const panes = new Map((state.snap?.panes || []).map((p) => [p.id, p]));
+  const now = performance.now();
+  for (const d of msg.panes || []) {
+    let lines;
+    if (d.lines) {
+      lines = d.lines.map(decode);
+    } else {
+      lines = (panes.get(d.id)?.lines || []).slice(d.shift || 0, (d.shift || 0) + d.n);
+      while (lines.length < d.n) lines.push('');
+      for (const [i, row] of d.edit || []) lines[i] = decode(row);
     }
-    snap.panes = merged;
+    panes.set(d.id, { id: d.id, cols: d.cols, rows: d.rows, scroll: d.scroll, mouse: d.mouse, alt: !!d.alt, shift: d.lines ? 0 : d.shift || 0, lines });
+    if (typed.has(d.id)) {
+      lag.echo = Math.round(now - typed.get(d.id));
+      typed.delete(d.id);
+    }
   }
-  // First snapshot seeds this page's navigation state
-  if (!state.snap) {
-    state.view = where.view || (mobile() ? 'side' : 'stage');
+  // Pane rows alone keep the head object, so a subscriber can skip work
+  // that only the head feeds by checking `snap.projects` for identity.
+  const snap = msg.head ? { ...state.snap, ...msg.head } : state.snap;
+  for (const key in msg.head) if (msg.head[key] === null) delete snap[key];
+  snap.panes = [...panes.values()];
+  take(snap);
+}
+
+let seeded = false;
+
+/** Make `snap` the current picture; the first one also seeds this page's navigation. */
+function take(snap) {
+  // First snapshot seeds this page's navigation state. It used to set the
+  // phone's view to 'side', which no rule shows: a reload came up blank.
+  const first = !seeded;
+  seeded = true;
+  if (first) {
     state.selected = where.selected;
     if (where.layout) state.layout = where.layout;
   }
-  // Adopt a window this page asked for
-  if (awaited) {
-    const spawned = snap.projects
-      .flatMap((p) => p.windows)
-      .find((w) => !awaited.before.includes(w.id));
-    if (spawned) {
-      state.selected = spawned.project;
-      location.hash = `#w${spawned.id}`;
-      awaited = null;
-    }
-  }
   state.snap = snap;
+  if (first) {
+    route();
+    if (!mobile()) state.view = 'stage';
+  }
+  adopt();
   remember();
   emit();
+}
+
+/**
+ * Start from the head the server wrote into the page and the rows this
+ * page last showed, until the socket's first message replaces both.
+ */
+export function boot(head) {
+  let panes = [];
+  try {
+    panes = JSON.parse(localStorage.getItem('taix-rows') || '[]');
+  } catch {}
+  const ids = new Set(head.projects.flatMap((p) => p.windows.map((w) => w.id)));
+  take({ ...head, panes: panes.filter((p) => ids.has(p.id)).map((p) => ({ ...p, shift: 0 })) });
+}
+
+/** Keep the rows on screen for the next cold start; the page may be gone after this. */
+export function cacheRows() {
+  try {
+    localStorage.setItem('taix-rows', JSON.stringify((state.snap?.panes || []).slice(0, 4).map(({ shift, ...p }) => p)));
+  } catch {}
 }
 
 /** `/` is home; `#w<id>` is that window on the stage. */
@@ -232,6 +329,12 @@ export function spawnHere(project, harness) {
   send(harness ? { kind: 'spawn', project, harness } : { kind: 'new-terminal', project });
 }
 
+/** Start a stopped window and show it here, driven, once it has a pane. */
+export function startHere(win) {
+  awaited = { start: win.id, at: Date.now() };
+  send({ kind: 'start', window: win.id });
+}
+
 function adopt() {
   if (!awaited) return;
   // A spawn that failed says so in a toast; give up rather than pounce on
@@ -240,10 +343,13 @@ function adopt() {
     awaited = null;
     return;
   }
-  const fresh = windows().find((w) => w.project === awaited.project && !awaited.before.has(w.id));
+  const fresh = awaited.start
+    ? windows().find((w) => w.id === awaited.start && w.alive)
+    : windows().find((w) => w.project === awaited.project && !awaited.before.has(w.id));
   if (!fresh) return;
   awaited = null;
   state.shown = fresh.id;
+  state.selected = fresh.project;
   state.zoomed = null;
   view('stage');
   claim(fresh.id);
@@ -251,9 +357,10 @@ function adopt() {
 
 // ---------- server ----------
 
-// One POST at a time. Two keystrokes fired as parallel `fetch` calls can
-// travel on two connections and arrive in the wrong order, which is a
-// terminal typing its characters out of sequence - so they queue.
+// One message at a time, in order. Over the socket that is free; a POST
+// fallback could travel on another connection and overtake the one before
+// it, which is a terminal typing its characters out of sequence - so
+// every delivery goes through one chain.
 let inFlight = Promise.resolve();
 
 // Commands parked while the desktop is unreachable. NOT persisted: a
@@ -266,13 +373,26 @@ const QUEUE_CAP = 500;
 let queued = false;
 let retry = null;
 
+/** The live socket, set by app.js while it is open. */
+export const link = { socket: null };
+
 function post(cmd) {
-  return fetch('/cmd', {
+  return fetch(`/cmd?d=${device}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(cmd),
     keepalive: true,
   });
+}
+
+/** The socket when it is open, `POST /cmd` while it reconnects. */
+function deliver(cmd) {
+  const socket = link.socket;
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(cmd));
+    return Promise.resolve();
+  }
+  return post(cmd);
 }
 
 function park(cmd) {
@@ -297,13 +417,18 @@ function schedule() {
   }, 1000);
 }
 
+/** Marks typed straight into a window's line since its last Enter or ^C. */
+export const liveMarks = new Map();
+
 /** Fire a command at the desktop. Never awaited by callers that type. */
 export function send(cmd) {
+  if ((cmd.kind === 'key' && cmd.name === 'Enter') || cmd.kind === 'interrupt') liveMarks.delete(cmd.window);
+  if ((cmd.kind === 'key' || cmd.kind === 'keys' || cmd.kind === 'type') && !typed.has(cmd.window)) typed.set(cmd.window, performance.now());
   if (queued || document.body.classList.contains('dropped')) {
     return park(cmd);
   }
   inFlight = inFlight.then(() =>
-    post(cmd).catch(() => {
+    deliver(cmd).catch(() => {
       queued = true;
       park(cmd);
     }),
@@ -324,7 +449,7 @@ export function flushQueue(snap) {
   let failed = false;
   for (const cmd of valid) {
     inFlight = inFlight.then(() =>
-      post(cmd).catch(() => {
+      deliver(cmd).catch(() => {
         failed = true;
         cmdQueue.push(cmd);
       }),
@@ -358,7 +483,16 @@ export async function api(path, body) {
 
 /** True when this page is driving the given window. */
 export function driving(id) {
-  return state.snap && state.snap.lock.remote.includes(id);
+  if (!state.snap || !state.snap.lock.remote.includes(id)) return false;
+  // Another browser holds it: its keys are this page's to watch, not send.
+  const who = state.snap.lock.holders?.find((x) => x.window === id);
+  return !who || who.device === device;
+}
+
+/** The name of another device driving this window, or null. */
+export function heldBy(id) {
+  const who = state.snap?.lock.holders?.find((x) => x.window === id);
+  return who && who.device !== device ? who.name : null;
 }
 
 /** Claim a terminal: send takeover if not already driving it. */
@@ -379,9 +513,11 @@ export function hasSnap() {
 }
 
 /** Track ownership when the snapshot confirms a window this page claimed is now remote-held. */
-export function syncHeld(remoteLocked) {
+export function syncHeld(remoteLocked, holders = []) {
   for (const id of state.held) {
-    if (!remoteLocked.includes(id)) state.held.delete(id);
+    // Taken by another device: do not take it back on reconnect.
+    const other = holders.some((x) => x.window === id && x.device !== device);
+    if (!remoteLocked.includes(id) || other) state.held.delete(id);
   }
   for (const id of remoteLocked) {
     if (state.held.has(id)) continue;
@@ -416,16 +552,17 @@ export function selected() {
   return projects()[0]?.id ?? null;
 }
 
-/** True when the given project is folded locally. */
+/** True when the project is folded: one state, shared with the desktop. */
 export function folded(projectId) {
-  if (!state.snap) return false;
-  // Seed from snapshot on first encounter.
-  if (!seenProjects.has(projectId)) {
-    seenProjects.add(projectId);
-    const proj = project(projectId);
-    if (proj && proj.folded) state.folded.add(projectId);
-  }
-  return state.folded.has(projectId);
+  return !!project(projectId)?.folded;
+}
+
+/** Fold or unfold a project everywhere. Shown at once; the next snapshot confirms. */
+export function setFolded(projectId, fold) {
+  const proj = project(projectId);
+  if (proj) proj.folded = fold;
+  send({ kind: 'fold', project: projectId, folded: fold });
+  emit();
 }
 
 /** The window a phone is showing, falling back to first window of selected project. */
@@ -496,14 +633,14 @@ export async function copy(text, what = 'Copied') {
  * A menu. A bottom sheet on a phone, a floating card on a desktop, one
  * call either way: `[{ label, hint, danger, run }]`.
  *
- * `head` is a string, or `{ title, subtitle, icon }` when the sheet is
+ * `head` is a string, or `{ title, subtitle, icon, preview }` when the sheet is
  * about one thing and should say which: a phone opens these from a row it
  * has already scrolled past.
  */
 export function menu(head, items, anchor) {
   const sheet = el('sheet');
   const card = el('sheet-card');
-  const { title, subtitle, icon: mark } = typeof head === 'string' ? { title: head } : head;
+  const { title, subtitle, icon: mark, preview } = typeof head === 'string' ? { title: head } : head;
   card.replaceChildren(
     h('div', { class: 'sheet-grip', 'aria-hidden': 'true' }),
     h(
@@ -517,6 +654,7 @@ export function menu(head, items, anchor) {
         subtitle ? h('span', { class: 'mono', text: subtitle }) : null,
       ),
     ),
+    ...(preview ? [preview] : []),
     ...items.filter(Boolean).map((item) =>
       item === '-'
         ? h('div', { class: 'sheet-sep' })
@@ -535,7 +673,7 @@ export function menu(head, items, anchor) {
               h('span', { text: item.label }),
               item.note ? h('span', { class: 'note mono', text: item.note }) : null,
             ),
-            item.hint ? h('span', { class: 'hint mono', text: item.hint }) : null,
+            item.hint ? h('span', { class: 'hint mono' }, item.hint) : null,
           ),
     ),
     h('button', { class: 'sheet-cancel', text: 'Cancel', onclick: () => close() }),
@@ -612,11 +750,24 @@ export function confirm(title, action = 'Do it') {
 
 // ---------- layout ----------
 
-export const mobile = () => window.matchMedia('(max-width: 860px)').matches;
+// A phone: narrow, or held sideways with no height to spare. An iPad in
+// portrait (744-834px wide, 1000+ tall) is not one - it gets the columns.
+// The stylesheet spells the same two queries; keep them in step.
+export const mobile = () => window.matchMedia('(max-width: 700px), (max-width: 860px) and (max-height: 500px)').matches;
+
+// Columns, but too narrow to keep the project list beside the terminal: an
+// iPad in portrait or a Split View half. The list becomes a drawer.
+export const compact = () => !mobile() && window.matchMedia('(max-width: 1100px)').matches;
+
+/** Open or close the project drawer; toggles when `open` is omitted. */
+export function drawer(open = !document.documentElement.classList.contains('drawer')) {
+  document.documentElement.classList.toggle('drawer', open);
+}
 
 /** Open a panel, or close it by passing the one already open. */
 export function panel(name) {
   state.panel = state.panel === name ? null : name;
+  drawer(false);
   if (state.panel && mobile()) state.view = 'panel';
   else if (!state.panel && state.view === 'panel') state.view = 'stage';
   for (const fn of panelSubscribers) fn(state.panel);
@@ -629,6 +780,7 @@ export function panel(name) {
  */
 export function view(name) {
   state.view = name;
+  drawer(false);
   const hash = name === 'stage' && shown() ? `#w${shown()}` : '';
   if (hash !== location.hash) {
     if (hash) history.pushState(null, '', hash);
@@ -717,6 +869,47 @@ export const notify = {
     const ok = await this.enable();
     toast(ok ? 'Notifications on' : 'Notifications refused', ok ? '' : 'bad');
     return ok;
+  },
+};
+
+/**
+ * Lock-screen alerts. `notify` above can only speak while this page is
+ * alive, and iOS kills it with the screen; this one is the desktop pushing
+ * through the browser vendor's service when a window starts waiting, so
+ * it arrives with the page asleep.
+ */
+export const push = {
+  /** iOS Safari tab: the API only exists in the installed Home Screen app. */
+  needsInstall() {
+    return navigator.standalone === false;
+  },
+  supported() {
+    return 'PushManager' in window && 'serviceWorker' in navigator && isSecureContext;
+  },
+  async current() {
+    return (await navigator.serviceWorker.ready).pushManager.getSubscription();
+  },
+  async enable() {
+    // Called first, synchronously from the tap: iOS only shows the prompt
+    // inside the gesture, and an `await` before it would end the gesture.
+    if ((await Notification.requestPermission()) !== 'granted') return false;
+    const { key } = await api('/push/key');
+    const raw = atob(key.replace(/-/g, '+').replace(/_/g, '/'));
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: Uint8Array.from(raw, (c) => c.charCodeAt(0)),
+    });
+    await api('/push/subscribe', sub.toJSON());
+    return true;
+  },
+  async disable() {
+    const sub = await this.current();
+    if (!sub) return;
+    // The server also forgets it on the first 404/410, so a failure here
+    // must not keep the browser side from unsubscribing.
+    await api('/push/unsubscribe', { endpoint: sub.endpoint }).catch(() => {});
+    await sub.unsubscribe();
   },
 };
 

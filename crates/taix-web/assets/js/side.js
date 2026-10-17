@@ -4,6 +4,7 @@ import {
   emit,
   send,
   spawnHere,
+  startHere,
   h,
   menu,
   ask,
@@ -20,6 +21,7 @@ import {
   tint,
   selected,
   folded,
+  setFolded,
   shown,
   driving,
   claim,
@@ -27,7 +29,10 @@ import {
   el,
   toast,
   ago,
+  tap,
 } from './store.js';
+import { age } from './age.js';
+import { focusInput } from './compose.js';
 
 let lastSignature = '';
 let lastHomeSignature = '';
@@ -108,7 +113,7 @@ function renderHomeTop(container) {
             state.zoomed = null;
             view('stage');
             claim(win.id);
-            el('entry-text').focus();
+            focusInput();
           },
         }),
       ),
@@ -211,7 +216,9 @@ function render(container) {
         } else if (state.tab === 'agents') {
           matchingWindows = matchingWindows.filter((w) => w.kind !== 'terminal');
         }
-        if (matchingWindows.length === 0) return null;
+        // An empty project still belongs under "All": its "+ New terminal"
+        // row is the only way to give it a first window from here.
+        if (matchingWindows.length === 0 && (filterText || state.tab !== 'all')) return null;
         return renderProject(p, matchingWindows);
       })
       .filter(Boolean);
@@ -235,26 +242,21 @@ function renderProject(proj, matchingWindows) {
         class: 'proj-head',
         // The name opens the project: its first window on the stage. The
         // chevron folds; the dots are the menu.
-        onclick: (e) => {
+        ...tap((e) => {
           if (e.target.closest('.proj-menu, .chevron')) return;
           state.selected = proj.id;
           state.shown = proj.windows[0]?.id ?? null;
           state.zoomed = null;
           view('stage');
-        },
+        }),
       },
       h('button', {
         class: 'chevron',
         'aria-label': isFolded ? 'Expand' : 'Collapse',
-        onclick: (e) => {
+        ...tap((e) => {
           e.stopPropagation();
-          if (isFolded) {
-            state.folded.delete(proj.id);
-          } else {
-            state.folded.add(proj.id);
-          }
-          emit();
-        },
+          setFolded(proj.id, !isFolded);
+        }),
         text: isFolded ? '›' : '⌄',
       }),
       h('div', { class: 'proj-info' }, h('div', { class: 'proj-name', text: proj.name }), h('div', { class: 'proj-path mono', text: shortenPath(proj.path) })),
@@ -292,15 +294,15 @@ function renderWindow(win, projectId) {
   const isFocused = shown() === win.id;
   const isDriving = driving(win.id);
   
-  // subtitle: for browser windows show the URL; for terminals show state/mem
+  // subtitle: for browser windows show the URL; for terminals show state/mem.
+  // A live terminal's state carries how long it has been in it.
   let subtitle = '';
+  const aged = age(win);
   if (win.kind === 'browser' && win.url) {
     subtitle = win.url;
   } else if (win.alive) {
-    const parts = [];
-    if (win.mem_kib) parts.push(bytes(win.mem_kib));
-    parts.push(win.state);
-    subtitle = parts.join(' · ');
+    subtitle = win.mem_kib ? `${bytes(win.mem_kib)} · ` : '';
+    if (!aged) subtitle += win.state;
   } else {
     subtitle = win.state;
   }
@@ -335,7 +337,9 @@ function renderWindow(win, projectId) {
     'div',
     {
       class: `win${isFocused ? ' focused' : ''}${win.attention ? ' attention' : ''}${isDriving ? ' driving' : ''}`,
-      onclick: () => {
+      ...tap((e) => {
+        // The row's own buttons (quick answers, the menu) are not a tap on it.
+        if (e.target.closest('button')) return;
         // The stage follows the tap, and so does the project column: a
         // window opened from a project this page was not listing would
         // otherwise show an empty stage.
@@ -343,10 +347,13 @@ function renderWindow(win, projectId) {
         state.selected = projectId;
         state.zoomed = null;
         view('stage');
-      },
+        // A stopped terminal has nothing to show: tapping it is asking for
+        // it to run, the same as "click to start" on the desktop.
+        if (!win.alive && win.kind !== 'browser') startHere(win);
+      }),
     },
     h('div', { class: 'win-icon' }, icon(win.icon)),
-    h('div', { class: 'win-info' }, h('div', { class: 'win-name', text: win.name, style: tint(win) ? `color: ${tint(win)}` : '' }), subtitle ? h('div', { class: 'win-subtitle mono', text: subtitle }) : null),
+    h('div', { class: 'win-info' }, h('div', { class: 'win-name', text: win.name, style: tint(win) ? `color: ${tint(win)}` : '' }), subtitle || aged ? h('div', { class: 'win-subtitle mono' }, subtitle, aged) : null),
     h('span', { class: `dot ${win.state}` }),
     quickActions,
     h('button', {
@@ -412,7 +419,7 @@ function openWindowMenu(win, anchor) {
     },
     {
       label: win.alive ? 'Kill' : 'Start',
-      run: () => send({ kind: win.alive ? 'kill' : 'start', window: win.id }),
+      run: () => (win.alive ? send({ kind: 'kill', window: win.id }) : startHere(win)),
     },
     '-',
     win.tmux && win.kind !== 'browser' && {

@@ -8,6 +8,9 @@
 //! Deliberately UI-agnostic: renders into a [`Chunk`] sink so a GTK front can
 //! build Pango markup and a Ratatui front can build spans from the same grid.
 
+mod shell;
+pub use shell::{Command, Shell};
+
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
@@ -73,12 +76,34 @@ pub enum Chunk<'a> {
     LineBreak,
 }
 
-/// A live emulator for the focused pane.
+/// A live emulator for the focused pane, or one a browser drives.
 pub struct Live {
     term: Term<VoidListener>,
     parser: Processor,
     size: Size,
+    title: Title,
+    /// Bytes swallowed by the current title; see `TITLE_MAX`.
+    title_len: usize,
 }
+
+/// Where `feed` is in a screen-style title, `ESC k TITLE ESC \`. tmux takes
+/// it as the pane's name but `%output` hands the raw bytes on, and alacritty
+/// does not know the sequence: it prints TITLE. oh-my-zsh sends one before
+/// every command under tmux, so `echo hi` printed `echohi`.
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Title {
+    #[default]
+    Out,
+    /// A fragment ended on ESC; held back until the next byte says what it was.
+    Esc,
+    In,
+    InEsc,
+}
+
+/// A real title is a command name. An `ESC k` that never closes (binary
+/// output, a cut stream) must not eat the pane, so past this it is dropped
+/// and output resumes.
+const TITLE_MAX: usize = 256;
 
 impl Live {
     pub fn new(size: Size) -> Self {
@@ -86,6 +111,8 @@ impl Live {
             term: new_term(size),
             parser: Processor::new(),
             size,
+            title: Title::Out,
+            title_len: 0,
         }
     }
 
@@ -97,14 +124,50 @@ impl Live {
     /// fragment lands mid-column — which visibly splits the first live line.
     pub fn seed(&mut self, captured: &[u8], cursor: (usize, usize)) {
         feed_capture(&mut self.term, &mut self.parser, self.size, captured);
+        // A capture ends on its last cell's colours, never a reset; left
+        // active, they paint every default-coloured cell the program writes.
         let (x, y) = (cursor.0 + 1, cursor.1 + 1);
         self.parser
-            .advance(&mut self.term, format!("\x1b[{y};{x}H").as_bytes());
+            .advance(&mut self.term, format!("\x1b[0m\x1b[{y};{x}H").as_bytes());
     }
 
     /// Feed a `%output` fragment. State persists across calls.
     pub fn feed(&mut self, bytes: &[u8]) {
-        self.parser.advance(&mut self.term, bytes);
+        if self.title == Title::Out && !bytes.contains(&0x1b) {
+            return self.parser.advance(&mut self.term, bytes);
+        }
+        let mut out = Vec::with_capacity(bytes.len() + 1);
+        for &b in bytes {
+            self.title = match (self.title, b) {
+                (Title::Out, 0x1b) => Title::Esc,
+                (Title::Out, _) => {
+                    out.push(b);
+                    Title::Out
+                }
+                (Title::Esc, b'k') => {
+                    self.title_len = 0;
+                    Title::In
+                }
+                // A second ESC cancels the first, as in a real terminal.
+                (Title::Esc, 0x1b) => Title::Esc,
+                (Title::Esc, _) => {
+                    out.extend([0x1b, b]);
+                    Title::Out
+                }
+                (Title::In | Title::InEsc, 0x1b) => Title::InEsc,
+                (Title::InEsc, b'\\') | (Title::In | Title::InEsc, 0x07) => Title::Out,
+                (Title::In | Title::InEsc, _) => {
+                    self.title_len += 1;
+                    if self.title_len > TITLE_MAX {
+                        out.push(b);
+                        Title::Out
+                    } else {
+                        Title::In
+                    }
+                }
+            };
+        }
+        self.parser.advance(&mut self.term, &out);
     }
 
     /// The grid this emulator is running at, for a consumer drawing it
@@ -113,9 +176,9 @@ impl Live {
         self.size
     }
 
-    /// Renders the cursor cell, which a snapshot cannot: only the focused
-    /// pane has a live emulator, and only the focused pane receives keys, so
-    /// the block appears exactly where typing will land and nowhere else.
+    /// Renders the cursor cell, which a snapshot cannot: a capture has no
+    /// cursor, and only a pane with an emulator is one somebody can type
+    /// into, so the block appears exactly where typing will land.
     pub fn render(&self, sink: &mut impl FnMut(Chunk<'_>)) {
         // A full-screen program that hides the cursor (an agent's spinner, vim
         // in visual mode) means "no insertion point"; drawing one would lie.
@@ -137,6 +200,58 @@ impl Live {
             motion: m.contains(TermMode::MOUSE_MOTION),
             sgr: m.contains(TermMode::SGR_MOUSE),
         }
+    }
+
+    /// Whether the program has switched to the alternate screen: a
+    /// full-screen TUI, which a page should not local-echo into.
+    pub fn alt_screen(&self) -> bool {
+        self.term.mode().contains(TermMode::ALT_SCREEN)
+    }
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+
+    #[test]
+    fn a_screen_title_is_not_printed_even_split_across_fragments() {
+        let size = Size { cols: 20, rows: 2 };
+        let mut live = Live::new(size);
+        for part in [&b"\x1bkec"[..], b"ho\x1b", b"\\hi\x1b", b"[1mB"] {
+            live.feed(part);
+        }
+        let mut text = String::new();
+        live.render(&mut |c| {
+            if let Chunk::Text(t, _) = c {
+                text.push_str(t)
+            }
+        });
+        assert_eq!(text.trim(), "hiB");
+    }
+
+    fn shown(chunks: &[&[u8]]) -> String {
+        let mut live = Live::new(Size { cols: 80, rows: 8 });
+        for c in chunks {
+            live.feed(c);
+        }
+        let mut text = String::new();
+        live.render(&mut |c| match c {
+            Chunk::Text(t, _) => text.push_str(t),
+            Chunk::LineBreak => text.push('\n'),
+        });
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn an_unclosed_title_gives_the_pane_back() {
+        let junk = vec![b'a'; TITLE_MAX];
+        assert_eq!(shown(&[b"\x1bk", &junk, b"ok"]), "ok");
+    }
+
+    #[test]
+    fn bel_ends_a_title_and_a_doubled_esc_still_opens_one() {
+        assert_eq!(shown(&[b"\x1bkt\x07x"]), "x");
+        assert_eq!(shown(&[b"\x1b\x1bkt\x1b\\y"]), "y");
     }
 }
 
@@ -162,6 +277,39 @@ impl Mouse {
     /// Does the pointer belong to the program at all?
     pub fn wanted(&self) -> bool {
         self.click || self.drag || self.motion
+    }
+
+    /// Follow the program's mouse modes through raw pane output, for a pane
+    /// with no emulator - only the desktop's focused pane has one, and a
+    /// phone driving another pane still has to know a TUI wants the wheel.
+    /// Applies every `ESC [ ? n ; … h|l` it finds for 1000/1002/1003/1006.
+    ///
+    /// ponytail: a sequence split across two output chunks is missed; the
+    /// next mode change, or a reseed from tmux's own flags, corrects it.
+    pub fn scan(&mut self, bytes: &[u8]) {
+        let mut rest = bytes;
+        while let Some(at) = rest.windows(3).position(|w| w == b"\x1b[?") {
+            rest = &rest[at + 3..];
+            let end = rest
+                .iter()
+                .position(|b| !(b.is_ascii_digit() || *b == b';'))
+                .unwrap_or(rest.len());
+            let on = match rest.get(end) {
+                Some(b'h') => true,
+                Some(b'l') => false,
+                _ => continue,
+            };
+            for mode in rest[..end].split(|b| *b == b';') {
+                match mode {
+                    b"1000" => self.click = on,
+                    b"1002" => self.drag = on,
+                    b"1003" => self.motion = on,
+                    b"1006" => self.sgr = on,
+                    _ => {}
+                }
+            }
+            rest = &rest[end..];
+        }
     }
 }
 
@@ -426,6 +574,27 @@ mod tests {
 
     const S: Size = Size { cols: 20, rows: 3 };
 
+    #[test]
+    fn mouse_scan_follows_set_and_reset_across_chunks() {
+        let mut m = Mouse::default();
+        m.scan(b"hello\x1b[?1049h\x1b[?1000;1006hworld");
+        assert_eq!(
+            m,
+            Mouse {
+                click: true,
+                sgr: true,
+                ..Mouse::default()
+            }
+        );
+        m.scan(b"\x1b[?1002h");
+        assert!(m.drag && m.wanted());
+        // A TUI exiting turns it all off again; unrelated private modes and
+        // a lone `ESC [ ?` at the end of a chunk change nothing.
+        m.scan(b"\x1b[?1000l\x1b[?1002l\x1b[?25l\x1b[?");
+        assert!(!m.wanted());
+        assert!(m.sgr);
+    }
+
     /// Flatten a render into a comparable script: `text|style-summary`, with
     /// `/` for line breaks.
     fn script(chunks: impl Fn(&mut dyn FnMut(Chunk<'_>))) -> String {
@@ -570,6 +739,30 @@ mod tests {
         let mut live = Live::new(S);
         live.seed(b"abc\nxy", (0, 2));
         assert_eq!(script(|sink| live.render(&mut { sink })), "abc|;/xy|;/ |C;");
+    }
+
+    #[test]
+    fn a_seed_leaves_no_colour_active() {
+        // capture-pane -e ends on whatever colour the last cell had; ratatui
+        // writes default cells with no SGR at all.
+        let mut live = Live::new(S);
+        live.seed(b"\x1b[41mred", (3, 0));
+        live.feed(b"x");
+        assert_eq!(
+            script(|sink| live.render(&mut { sink })),
+            "red|bgcd0000;x|; |C;//"
+        );
+    }
+
+    #[test]
+    fn osc8_links_show_their_label_once() {
+        // BEL as programs write it; ESC \ as capture-pane -e hands it back.
+        let label = "label|;//";
+        assert_eq!(snap(S, b"\x1b]8;;https://x.io\x07label\x1b]8;;\x07"), label);
+        assert_eq!(
+            snap(S, b"\x1b]8;;https://x.io\x1b\\label\x1b]8;;\x1b\\"),
+            label
+        );
     }
 
     #[test]

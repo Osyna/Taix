@@ -383,6 +383,8 @@ pub mod cmd {
         pub cols: usize,
         pub rows: usize,
         pub cursor: (usize, usize),
+        /// The pane is on the alternate screen (`#{alternate_on}`).
+        pub alt: bool,
         /// The styled screen, `capture-pane -e`.
         pub screen: Vec<u8>,
         /// The DEC private mouse modes the program in the pane has set, as
@@ -402,7 +404,7 @@ pub mod cmd {
                 "-p",
                 "-t",
                 &target,
-                "#{pane_width} #{pane_height} #{cursor_x} #{cursor_y} \
+                "#{pane_width} #{pane_height} #{cursor_x} #{cursor_y} #{alternate_on} \
                  #{mouse_standard_flag}#{mouse_button_flag}#{mouse_all_flag}#{mouse_sgr_flag}",
                 ";",
                 "capture-pane",
@@ -420,6 +422,7 @@ pub mod cmd {
             cols: f.next()?.parse().ok()?,
             rows: f.next()?.parse().ok()?,
             cursor: (f.next()?.parse().ok()?, f.next()?.parse().ok()?),
+            alt: f.next()? == "1",
             modes: mouse_modes(f.next().unwrap_or_default()),
             screen: out[nl + 1..].to_vec(),
             seq: reply.seq,
@@ -443,7 +446,7 @@ pub mod cmd {
                 "-p",
                 "-t",
                 target.as_str(),
-                "#{pane_width} #{pane_height} #{cursor_x} #{cursor_y} \
+                "#{pane_width} #{pane_height} #{cursor_x} #{cursor_y} #{alternate_on} \
                  #{mouse_standard_flag}#{mouse_button_flag}#{mouse_all_flag}#{mouse_sgr_flag}",
                 ";",
                 "capture-pane",
@@ -475,6 +478,7 @@ pub mod cmd {
                     cols: f.next()?.parse().ok()?,
                     rows: f.next()?.parse().ok()?,
                     cursor: (f.next()?.parse().ok()?, f.next()?.parse().ok()?),
+                    alt: f.next()? == "1",
                     modes: mouse_modes(f.next().unwrap_or_default()),
                     screen: capture_body.to_vec(),
                     seq: pair[1].seq,

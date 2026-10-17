@@ -1,11 +1,17 @@
+import { age } from './age.js';
+import { offline, online } from './hints.js';
+import * as hostList from './hosts.js';
 // Boot: hold the event stream open, publish each snapshot to the modules,
 // and own the three pieces of chrome that belong to no panel - the bar, the
 // panel tabs, and which column a phone is looking at.
 
-import { state, on, emit, el, arrive, spawnHere, panel, view, mobile, shown, selected, toast, copy, windows, windowById, driving, send, claim, reconnected, notify, syncHeld, project, sym, icon, menu, h, flushQueue, queueCount } from './store.js';
+import { state, on, emit, el, arrive, boot, cacheRows, resetStyles, lag, spawnHere, startHere, panel, view, mobile, compact, drawer, shown, selected, toast, copy, windows, windowById, driving, send, claim, reconnected, notify, syncHeld, project, sym, icon, menu, h, flushQueue, queueCount, link, client } from './store.js';
 import { mountSide } from './side.js';
 import { mountTerm } from './term.js';
-import { mountCompose } from './compose.js';
+import { mountCompose, focusInput } from './compose.js';
+import * as lock from './lock.js';
+import { device } from './store.js';
+import { notice } from './collab.js';
 
 // 44 KB of panel code that a phone session showing only a terminal never
 // needs. The desktop's info rail lives in there too, so that layout loads
@@ -21,69 +27,140 @@ function loadPanels() {
   return panels;
 }
 
-let source = null;
+let socket = null;
 let dropped = false;
 let lastState = Date.now();
-let lastRaw = '';
+// Reconnect delay: quick after a blip, backing off while the desktop is
+// really gone so a sleeping laptop is not hammered.
+let backoff = 250;
+let again = null;
+
+/** The browser's install offer, held until the user asks for it. */
+let install = null;
+
+function installApp() {
+  install?.prompt();
+  install = null;
+}
 
 function stream() {
-  source = new EventSource('/events');
-  source.addEventListener('state', (ev) => {
-    if (ev.data === lastRaw) return;
-    lastRaw = ev.data;
-    const snap = JSON.parse(ev.data);
-    // Frames only move forward - except across a drop: a restarted server
-    // counts from one again, and refusing its frames would freeze the page.
-    if (!dropped && state.snap && snap.rev <= state.snap.rev) return;
+  if (lock.locked()) return;
+  clearTimeout(again);
+  // `c` names this page, so the socket sends the screens it watches and
+  // nothing else.
+  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?d=${device}&c=${client}`);
+  socket = ws;
+  // The style table is per socket: the new one starts numbering again.
+  resetStyles();
+  ws.onmessage = (ev) => {
+    // Not a snapshot: another device handing this page a window.
+    if (ev.data.startsWith('{"notice"')) return notice(JSON.parse(ev.data).notice);
+    if (ws !== socket) return;
+    // `head` when the picture moved, plus the rows of the watched panes
+    // that did. A socket always starts with a head.
+    const msg = JSON.parse(ev.data);
+    if (msg.pong !== undefined) {
+      lastPong = performance.now();
+      lag.rtt = Math.round(lastPong - msg.pong);
+      showLag();
+    }
+    if (!msg.head && !msg.panes?.length) return;
+    if (!msg.head && !state.snap) return;
     lastState = Date.now();
+    document.body.classList.remove('booting');
+    // A head carries only the sections that changed: lock may be absent.
+    if (msg.head?.lock) syncHeld(msg.head.lock.remote, msg.head.lock.holders);
+    arrive(msg);
     if (dropped) {
       document.body.classList.remove('dropped');
       dropped = false;
-      const result = flushQueue(snap);
+      online();
+      const result = flushQueue(state.snap);
       if (result.sent > 0) {
-        const msg = result.dropped > 0
+        const note = result.dropped > 0
           ? `Sent ${result.sent} queued keystroke${result.sent > 1 ? 's' : ''}, dropped ${result.dropped}`
           : `Sent ${result.sent} queued keystroke${result.sent > 1 ? 's' : ''}`;
-        toast(msg);
+        toast(note);
       } else {
         toast('Reconnected');
       }
     }
-    document.body.classList.remove('booting');
-    syncHeld(snap.lock.remote);
-    arrive(snap);
-  });
-  source.onerror = () => {
-    if (!dropped) {
-      document.body.classList.add('dropped');
-      dropped = true;
-    }
-    // A stream the server refused stays CLOSED; the one refusal that is
-    // not a network blip is an expired pairing, and the page for that is
-    // the pairing page.
-    if (source.readyState === EventSource.CLOSED) {
-      fetch('/health').then((r) => { if (r.status === 401) location.reload(); }, () => {});
-    }
+    showLag();
   };
-  source.onopen = () => {
+  ws.onopen = () => {
+    if (ws !== socket) return;
+    backoff = 250;
+    link.socket = ws;
     if (dropped) {
       for (const id of state.held) {
         send({ kind: 'takeover', window: id });
       }
-      reconnected();
     }
+    // Every socket, not only after a drop: it sends the screens the page
+    // watches, and a restarted desktop has never heard of them.
+    reconnected();
+  };
+  ws.onclose = () => {
+    // A socket replaced by a newer one says nothing: only the current
+    // connection's end is a drop.
+    if (ws !== socket) return;
+    link.socket = null;
+    if (!dropped) {
+      document.body.classList.add('dropped');
+      dropped = true;
+      offline(lastState);
+    }
+    // The one refusal that is not a network blip is an expired pairing,
+    // and the page for that is the pairing page.
+    fetch('/health').then((r) => { if (r.status === 401) location.reload(); }, () => {});
+    // A device that locked closes with 4423; either way the answer is the
+    // lock screen, not a reconnect into a refusal.
+    lock.check();
+    again = setTimeout(stream, backoff);
+    backoff = Math.min(backoff * 2, 5000);
   };
 }
 
+let lastPong = 0;
+
+/** Round trip and key-to-screen time, small, in the bar. */
+function showLag() {
+  const text = lag.rtt === null ? '' : `${lag.rtt} ms${lag.echo === null ? '' : ` · key ${lag.echo} ms`}`;
+  const node = el('bar-lag');
+  if (node.textContent !== text) node.textContent = text;
+}
+
+function ping() {
+  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ kind: 'ping', t: performance.now() }));
+}
+
+/** Replace the socket with a fresh one now, not when the old one is noticed to be dead. */
+function reconnect() {
+  const old = socket;
+  stream();
+  old.close();
+}
+
+setInterval(() => document.visibilityState === 'visible' && ping(), 5000);
+
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') {
-    const stale = Date.now() - lastState > 15000;
-    if (source && (source.readyState === EventSource.CLOSED || stale)) {
-      source.close();
-      stream();
-    }
-  }
+  if (document.visibilityState === 'hidden') return cacheRows();
+  // Back after more than the idle limit, the server has locked this
+  // device; learn it now rather than from the next refused request.
+  lock.check();
+  if (!socket) return;
+  // A phone back from sleep holds a socket the OS killed long ago, and
+  // learns so only on its next write: ask, and if nothing answers within
+  // a second, reconnect now rather than on that write.
+  if (socket.readyState !== WebSocket.OPEN) return reconnect();
+  const asked = performance.now();
+  ping();
+  const asking = socket;
+  setTimeout(() => {
+    if (lastPong < asked && asking === socket) reconnect();
+  }, 1000);
 });
+window.addEventListener('pagehide', cacheRows);
 
 function bar(snap) {
   const where = snap.bar.find((b) => b.id === 'where');
@@ -109,7 +186,9 @@ function header(snap) {
   
   // mobile crumb: project · window
   el('crumb-name').textContent = win?.name || '';
-  el('crumb-sub').textContent = win ? [proj?.name, win.state].filter(Boolean).join(' · ') : '';
+  const aged = win && age(win);
+  const crumb = win ? [proj?.name, aged ? '' : win.state].filter(Boolean).join(' · ') : '';
+  el('crumb-sub').replaceChildren(crumb + (aged && crumb ? ' · ' : ''), aged || '');
   
   // facts: N live · M total
   const allWins = windows();
@@ -124,6 +203,12 @@ function header(snap) {
     el('attn-text').textContent = `${attnWins.length} need${attnWins.length > 1 ? '' : 's'} input`;
   } else {
     attn.hidden = true;
+  }
+
+  // App badge: windows whose agent is waiting. Not every browser has one.
+  if ('setAppBadge' in navigator) {
+    const waiting = allWins.filter((w) => w.state === 'waiting').length;
+    (waiting ? navigator.setAppBadge(waiting) : navigator.clearAppBadge()).catch(() => {});
   }
 }
 
@@ -142,6 +227,49 @@ function chrome(snap) {
   // desktop nav is the sidebar toggle; on a phone it is the way back out
   // of whatever screen you opened.
   el('nav').classList.toggle('back', mobile() && state.view !== 'home');
+}
+
+// Window and project navigation from a hardware keyboard (an iPad's, or a
+// laptop's). Command on Apple, Ctrl+Shift elsewhere, where plain Ctrl is the
+// terminal's own. Matched on `code`, since Shift changes what `key` spells,
+// and only with the modifier held, so Command-C/V/A stay the browser's and
+// a bare key still reaches the terminal sink.
+const apple = /Mac|iPhone|iPad/.test(navigator.platform);
+
+function shortcut(e) {
+  if (!(apple ? e.metaKey && !e.ctrlKey : e.ctrlKey && e.shiftKey && !e.metaKey) || e.altKey) return;
+  const win = windowById(shown());
+  const proj = win?.project ?? selected();
+  const list = project(proj)?.windows || [];
+  const at = list.findIndex((w) => w.id === win?.id);
+  const code = e.code;
+
+  const to = (target) => {
+    if (!target) return;
+    state.shown = target.id;
+    state.selected = proj;
+    state.zoomed = null;
+    view('stage');
+  };
+  if (/^Digit[1-9]$/.test(code)) to(list[+code.slice(5) - 1]);
+  else if (code === 'BracketLeft') to(list[at - 1]);
+  else if (code === 'BracketRight') to(list[at + 1]);
+  else if (code === 'KeyT') {
+    if (proj) spawnHere(proj);
+  } else if (code === 'Period') {
+    if (!win) return;
+    claim(win.id);
+    send({ kind: 'key', window: win.id, name: 'C-c' });
+  } else if (code === 'ArrowUp' || code === 'ArrowDown') {
+    const all = state.snap?.projects || [];
+    const next = all[all.findIndex((p) => p.id === proj) + (code === 'ArrowUp' ? -1 : 1)];
+    if (!next) return;
+    state.selected = next.id;
+    state.shown = next.windows[0]?.id ?? null;
+    state.zoomed = null;
+    view('stage');
+  } else return;
+  e.preventDefault();
 }
 
 function openPalette() {
@@ -214,6 +342,8 @@ function openPalette() {
     { label: 'Files', run: async () => { await loadPanels(); panel('files'); } },
     { label: 'Source control', run: async () => { await loadPanels(); panel('git'); } },
     { label: 'Automation', run: async () => { await loadPanels(); panel('jobs'); } },
+    { label: 'Ports and preview', run: async () => { await loadPanels(); panel('ports'); } },
+    { label: 'Command history', run: async () => { await loadPanels(); panel('history'); } },
     { label: 'Settings', run: async () => { await loadPanels(); panel('settings'); } },
   ];
   const shownWin = windowById(shown());
@@ -224,6 +354,10 @@ function openPalette() {
     { label: 'Copy page link', run: () => copy(location.origin + '/') },
     { label: 'Give back every terminal', run: () => send({ kind: 'release' }) },
   );
+  if (install) cmds.push({ label: 'Install TaiX as an app', run: installApp });
+  for (const x of hostList.hosts()) {
+    if (x.url !== location.origin) cmds.push({ label: `Switch host: ${x.label}`, subtitle: x.url, run: () => hostList.switchHost(x.url) });
+  }
   for (const cmd of cmds) {
     items.push({ icon: sym('gear'), ...cmd, kind: 'command' });
   }
@@ -291,16 +425,25 @@ function openPalette() {
 }
 
 function wire() {
-  // nav: back out of whatever the phone opened, sidebar toggle on a laptop
+  // nav: back out of whatever the phone opened; the project drawer on a
+  // tablet too narrow to keep the list beside the terminal.
   el('nav').onclick = () => {
     if (mobile() && state.view !== 'home') {
       if (state.panel) panel(state.panel);
       else view('home');
     } else {
-      const side = el('side');
-      side.hidden = !side.hidden;
+      drawer();
     }
   };
+
+  // The stage behind an open drawer is its scrim: a tap there closes the
+  // drawer and does nothing else, so it cannot also claim a pane.
+  el('stage').addEventListener('click', (e) => {
+    if (!document.documentElement.classList.contains('drawer')) return;
+    e.stopPropagation();
+    e.preventDefault();
+    drawer(false);
+  }, true);
   
   el('panel-close').onclick = async () => { await loadPanels(); panel(state.panel); };
   
@@ -308,9 +451,11 @@ function wire() {
   for (const button of document.querySelectorAll('#rail button[data-go], #dock button[data-go]')) {
     button.onclick = () => {
       const go = button.dataset.go;
-      if (go === 'home' || go === 'stage') {
+      if (go === 'home' && compact()) {
+        drawer();
+      } else if (go === 'home' || go === 'stage') {
         view(go);
-      } else if (go === 'files' || go === 'git' || go === 'jobs' || go === 'settings') {
+      } else if (go === 'files' || go === 'git' || go === 'jobs' || go === 'ports' || go === 'history' || go === 'settings') {
         loadPanels().then(() => panel(go));
       } else if (go === 'more') {
         // dock more menu
@@ -318,11 +463,14 @@ function wire() {
           'More',
           [
             { label: 'Automation', run: async () => { await loadPanels(); panel('jobs'); } },
+            { label: 'Ports and preview', run: async () => { await loadPanels(); panel('ports'); } },
+            { label: 'Command history', run: async () => { await loadPanels(); panel('history'); } },
             { label: 'Settings', run: async () => { await loadPanels(); panel('settings'); } },
             '-',
             { label: `Notifications ${notify.enabled() ? 'on' : 'off'}`, run: () => notify.toggle() },
             { label: 'Copy page link', run: () => copy(location.origin + '/') },
             { label: 'Give back every terminal', run: () => send({ kind: 'release' }) },
+            install && { label: 'Install TaiX as an app', run: installApp },
           ],
           button,
         );
@@ -337,6 +485,8 @@ function wire() {
   };
   
   el('stage-empty').querySelector('[data-act="new-terminal"]').onclick = () => {
+    const win = windowById(shown());
+    if (win && !win.alive && win.kind !== 'browser') return startHere(win);
     const projectId = selected();
     if (projectId) spawnHere(projectId);
   };
@@ -351,7 +501,7 @@ function wire() {
       state.zoomed = null;
       view('stage');
       claim(win.id);
-      el('entry-text').focus();
+      focusInput();
     }
   };
   
@@ -363,7 +513,9 @@ function wire() {
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
       e.preventDefault();
       openPalette();
+      return;
     }
+    shortcut(e);
   });
   
   // A page left open on a phone must release all claimed windows.
@@ -461,10 +613,39 @@ mountSide();
 mountTerm();
 mountCompose();
 chrome(null);
+// The head the server wrote into the page, and the rows last shown: the
+// first paint needs no socket.
+try {
+  const head = el('boot');
+  if (head) {
+    boot(JSON.parse(head.textContent));
+    document.body.classList.remove('booting');
+  }
+} catch (e) {
+  console.error(e);
+}
 stream();
+lock.onUnlock(() => {
+  backoff = 250;
+  const old = socket;
+  stream();
+  old?.close();
+});
+lock.check();
 if (!mobile()) {
   loadPanels();
 }
-if (notify.enabled()) {
+// Installable and openable offline. Service workers need a secure context:
+// over plain http on the LAN this is skipped, and the tailnet's https
+// address is where TaiX installs as an app.
+if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch((e) => console.error('SW registration failed', e));
 }
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  install = e;
+});
+window.addEventListener('appinstalled', () => {
+  install = null;
+  toast('TaiX installed');
+});

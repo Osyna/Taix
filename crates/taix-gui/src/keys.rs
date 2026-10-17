@@ -139,6 +139,31 @@ pub fn translate(key: Key, modifiers: ModifierType) -> Option<Press> {
     Some(Press::Text(ch.to_string()))
 }
 
+/// `[n]`: a file's number, typed before its path so the prose after it can
+/// point back at it ("the error is [1]").
+pub fn mark(n: usize) -> String {
+    format!("[{n}]")
+}
+
+/// File n's own colour as `#rrggbb`, the web page's `tint`: golden-angle
+/// hues, so no two files share one. HSL(h, 70%, 68%).
+pub fn tint(n: usize) -> String {
+    let h = (n as f64 * 137.508) % 360.0 / 60.0;
+    let (s, l) = (0.70, 0.68);
+    let c = (1.0 - (2.0 * l - 1.0f64).abs()) * s;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let v = |t: f64| ((t + l - c / 2.0) * 255.0).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", v(r), v(g), v(b))
+}
+
 /// Quote a dropped or pasted path for a shell, and for an agent reading a
 /// line of prose. A trailing space separates it from whatever is typed next.
 pub fn path_argument(path: &std::path::Path) -> String {
@@ -150,6 +175,22 @@ pub fn path_argument(path: &std::path::Path) -> String {
     }
 }
 
+/// File name for a selection stashed as an attachment: its first non-empty
+/// line, cut to something a path can carry.
+pub fn snippet_name(text: &str) -> String {
+    let stem: String = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .map(|c| if c == ' ' { '-' } else { c })
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .take(32)
+        .collect();
+    format!("{}.txt", if stem.is_empty() { "snippet" } else { &stem })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,6 +199,14 @@ mod tests {
     const CTRL: ModifierType = ModifierType::CONTROL_MASK;
     const SHIFT: ModifierType = ModifierType::SHIFT_MASK;
     const ALT: ModifierType = ModifierType::ALT_MASK;
+
+    #[test]
+    fn every_file_gets_its_own_colour() {
+        let all: std::collections::HashSet<_> = (1..=60).map(tint).collect();
+        assert_eq!(all.len(), 60);
+        // What Chromium computes for the web page's hsl(137.508 70% 68%).
+        assert_eq!(tint(1), "#74e796");
+    }
 
     #[test]
     fn printable_keys_are_typed_not_interpreted() {
@@ -288,6 +337,19 @@ mod tests {
         assert_eq!(
             path_argument(Path::new("/tmp/it's.png")),
             r"'/tmp/it'\''s.png' "
+        );
+    }
+
+    #[test]
+    fn a_selection_is_named_after_its_first_line() {
+        assert_eq!(
+            snippet_name("\n  error: no such file\nmore"),
+            "error-no-such-file.txt"
+        );
+        assert_eq!(snippet_name("***\n"), "snippet.txt");
+        assert_eq!(
+            snippet_name(&"a".repeat(80)),
+            format!("{}.txt", "a".repeat(32))
         );
     }
 }

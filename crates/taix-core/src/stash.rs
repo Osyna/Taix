@@ -30,6 +30,34 @@ pub fn stash(bytes: &[u8], name: &str) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+/// How long a stashed file is kept. A screenshot pasted into a prompt is
+/// read within minutes; two weeks covers "attach that again".
+const KEEP: std::time::Duration = std::time::Duration::from_secs(14 * 24 * 3600);
+
+/// The stashed files, newest first, as (path, size, modified). Files past
+/// [`KEEP`] are deleted on the way: listing is the tray opening, which is
+/// as good a moment as any to stop the directory growing forever.
+pub fn list() -> Vec<(PathBuf, u64, std::time::SystemTime)> {
+    let Ok(entries) = std::fs::read_dir(dir()) else {
+        return Vec::new();
+    };
+    let now = std::time::SystemTime::now();
+    let mut files: Vec<_> = entries
+        .flatten()
+        .filter_map(|e| {
+            let meta = e.metadata().ok().filter(|m| m.is_file())?;
+            let modified = meta.modified().ok()?;
+            if now.duration_since(modified).is_ok_and(|age| age > KEEP) {
+                let _ = std::fs::remove_file(e.path());
+                return None;
+            }
+            Some((e.path(), meta.len(), modified))
+        })
+        .collect();
+    files.sort_by_key(|f| std::cmp::Reverse(f.2));
+    files
+}
+
 /// A name from somewhere else - a phone's camera roll, a `Content-Type`
 /// guess - reduced to what a filesystem and a shell both take verbatim.
 /// Anything else becomes `_`: this name is about to be pasted onto a

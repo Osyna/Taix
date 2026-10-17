@@ -239,12 +239,24 @@ impl ProcTable {
         out
     }
 
+    /// Direct children of `pid`, in pid order - i.e. roughly launch order.
+    pub fn children_of(&self, pid: u32) -> Vec<u32> {
+        let mut out: Vec<u32> = self
+            .0
+            .iter()
+            .filter(|p| p.ppid == pid)
+            .map(|p| p.pid)
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
     pub fn ticks(&self, pid: u32) -> u64 {
         self.0.iter().find(|p| p.pid == pid).map_or(0, |p| p.ticks)
     }
 
     #[cfg(test)]
-    fn from_parents(pairs: &[(u32, u32)]) -> Self {
+    pub(crate) fn from_parents(pairs: &[(u32, u32)]) -> Self {
         let mut table = ProcTable::default();
         for &(pid, ppid) in pairs {
             table.0.push(Proc {

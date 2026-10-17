@@ -55,6 +55,10 @@ pub struct Config {
     /// Stop an agent left idle this long. `None` = never.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reap_idle_after_ms: Option<u64>,
+    /// Lines of scrollback tmux keeps per pane (~1 KB per line when full).
+    /// Applies to panes created after it changes.
+    #[serde(default = "default_history_limit")]
+    pub history_limit: usize,
     /// The LAN web front end. A nested table, so it must stay last: a TOML
     /// table ends the top level, and a scalar written after it would be
     /// read back as one of its keys.
@@ -144,6 +148,10 @@ fn default_idle_after_ms() -> u64 {
     2000
 }
 
+fn default_history_limit() -> usize {
+    10_000
+}
+
 fn default_font_size() -> f64 {
     10.0
 }
@@ -179,6 +187,7 @@ impl Default for Config {
             isolate: false,
             bar: default_bar(),
             reap_idle_after_ms: None,
+            history_limit: default_history_limit(),
             web: Web::default(),
         }
     }
@@ -305,16 +314,21 @@ pub fn set_web_key(key: &str) -> std::io::Result<()> {
     write_web_key(&web_key_path(), key)
 }
 
-fn web_key_path() -> std::path::PathBuf {
-    use std::fs;
+/// `$XDG_DATA_HOME/taix`, created. Everything TaiX keeps for itself - the
+/// pairing key, the push keys - lives here.
+pub fn data_dir() -> std::path::PathBuf {
     let dir = base_dir(
         std::env::var("XDG_DATA_HOME").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),
         ".local/share",
     )
     .join("taix");
-    let _ = fs::create_dir_all(&dir);
-    dir.join("web.key")
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn web_key_path() -> std::path::PathBuf {
+    data_dir().join("web.key")
 }
 
 fn write_web_key(path: &std::path::Path, key: &str) -> std::io::Result<()> {
