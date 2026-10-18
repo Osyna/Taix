@@ -1,0 +1,27 @@
+# nfpm config for the CLI/TUI package. Driven by packaging/release.sh, which sets VERSION and STAGE.
+name: taix
+arch: amd64
+platform: linux
+version: ${VERSION}
+release: "1"
+maintainer: TaiX contributors
+description: Orchestrate AI coding agents on one tmux server (CLI and TUI).
+homepage: https://github.com/Osyna/Taix
+license: Apache-2.0
+depends:
+  - tmux
+contents:
+  - src: ${STAGE}/taix
+    dst: /usr/bin/taix
+    file_info:
+      mode: 0755
+  - src: ${STAGE}/LICENSE
+    dst: /usr/share/licenses/taix/LICENSE
+    packager: archlinux
+  - src: ${STAGE}/LICENSE
+    dst: /usr/share/doc/taix/LICENSE
+    packager: deb
+  - src: ${STAGE}/LICENSE
+    dst: /usr/share/licenses/taix/LICENSE
+    packager: rpm
+    type: license

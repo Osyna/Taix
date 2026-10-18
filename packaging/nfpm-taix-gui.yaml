@@ -1,0 +1,52 @@
+# nfpm config for the desktop package. Driven by packaging/release.sh, which sets VERSION and STAGE.
+# taix-gui is built on Ubuntu 24.04 (glibc 2.39, GTK 4.12, libadwaita 1.5).
+name: taix-gui
+arch: amd64
+platform: linux
+version: ${VERSION}
+release: "1"
+maintainer: TaiX contributors
+description: TaiX desktop app (GTK4 / libadwaita) for orchestrating AI coding agents on tmux.
+homepage: https://github.com/Osyna/Taix
+license: Apache-2.0
+depends:
+  - taix (>= ${VERSION})
+  - libgtk-4-1 (>= 4.12)
+  - libadwaita-1-0 (>= 1.5)
+  - libwebkitgtk-6.0-4
+  - libc6 (>= 2.39)
+overrides:
+  rpm:
+    depends:
+      - taix >= ${VERSION}
+      - gtk4 >= 4.12
+      - libadwaita >= 1.5
+      - webkitgtk6.0
+      - glibc >= 2.39
+  archlinux:
+    depends:
+      - taix>=${VERSION}
+      - gtk4
+      - libadwaita
+      - webkitgtk-6.0
+contents:
+  - src: ${STAGE}/taix-gui
+    dst: /usr/bin/taix-gui
+    file_info:
+      mode: 0755
+  - src: ${STAGE}/dev.taix.TaiX.desktop
+    dst: /usr/share/applications/dev.taix.TaiX.desktop
+  - src: ${STAGE}/dev.taix.TaiX.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/dev.taix.TaiX.svg
+  - src: ${STAGE}/dev.taix.TaiX.png
+    dst: /usr/share/icons/hicolor/512x512/apps/dev.taix.TaiX.png
+  - src: ${STAGE}/LICENSE
+    dst: /usr/share/licenses/taix-gui/LICENSE
+    packager: archlinux
+  - src: ${STAGE}/LICENSE
+    dst: /usr/share/doc/taix-gui/LICENSE
+    packager: deb
+  - src: ${STAGE}/LICENSE
+    dst: /usr/share/licenses/taix-gui/LICENSE
+    packager: rpm
+    type: license

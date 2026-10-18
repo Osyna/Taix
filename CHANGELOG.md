@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
+
+- Linux packaging: static musl CLI/TUI tarball for any x86_64 Linux; native `taix` and `taix-gui` deb, rpm and Arch packages; GUI archive built on Ubuntu 24.04.
+- Release checksums published with the artifacts.
+- Version correction: workspace and crates are 0.3.1. The 0.3.0 release was tagged from workspace 0.2.0 and is left as is.
+- README: install, uninstall and supported-distribution notes. There is no automatic update mechanism.
+
+## 0.3.0
 
 ### A web page that keeps up
 

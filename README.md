@@ -23,6 +23,43 @@ desktop is the pane you scroll on the sofa.
 
 ## Quick start
 
+### Linux release packages
+
+Download the packages for your distribution and `SHA256SUMS` from the
+[latest release page](https://github.com/Osyna/Taix/releases/latest).
+
+- **Portable CLI/TUI (any x86_64 Linux, static musl):** `taix-x86_64-linux-musl.tar.gz`
+- **Native packages:** `taix` (CLI/TUI) as `.deb`, `.rpm` or Arch `.pkg.tar.zst`
+- **Desktop GUI:** `taix-gui` native package, or `taix-gui-x86_64-linux-gnu.tar.gz`. Needs GTK 4.12+, libadwaita 1.5+ and WebKitGTK 6: Ubuntu 24.04+, Debian 13+, current Fedora, current Arch. Older distributions: use the portable CLI/TUI.
+
+x86_64 only; no ARM builds.
+
+```bash
+# check the download against the checksum file on the release page
+sha256sum -c SHA256SUMS --ignore-missing
+
+# portable CLI
+tar -xzf taix-x86_64-linux-musl.tar.gz
+install -Dm755 taix-x86_64-linux-musl/taix ~/.local/bin/taix
+
+# Ubuntu 24.04+ / Debian 13+
+sudo apt install ./taix_0.3.1_amd64.deb ./taix-gui_0.3.1_amd64.deb
+# Fedora
+sudo dnf install ./taix-0.3.1-1.x86_64.rpm ./taix-gui-0.3.1-1.x86_64.rpm
+# Arch
+sudo pacman -U taix-0.3.1-1-x86_64.pkg.tar.zst taix-gui-0.3.1-1-x86_64.pkg.tar.zst
+```
+For CLI/TUI only, omit the `taix-gui` package. On Debian 12 and Ubuntu 22.04,
+install only the CLI package; their desktop libraries are too old. The portable
+archive also needs `tmux`, installed through your distribution's package manager.
+
+
+Uninstall: `sudo apt remove taix taix-gui` / `sudo dnf remove taix taix-gui` / `sudo pacman -R taix-gui taix`; for the portable install, `rm ~/.local/bin/taix ~/.local/bin/taix-gui`. Your projects and settings under the XDG config/state directories are left alone.
+
+TaiX does not update itself; install a newer release the same way.
+
+### Build from source
+
 Build from source with Rust and Cargo:
 
 ```bash
@@ -77,9 +114,8 @@ install -Dm755 target/release/taix-gui ~/.local/bin/taix-gui
 taix --gui
 ```
 
-Building from source needs Rust 1.85 or newer (edition 2024): Debian 13,
-Fedora and Arch ship that, Ubuntu 24.04 and Debian 12 do not — use
-[rustup](https://rustup.rs) there.
+Use the current stable Rust toolchain from [rustup](https://rustup.rs) when
+building from source.
 
 </details>
 
@@ -401,7 +437,7 @@ Every field is optional; omitted ones keep the catalogue default.
 
 - **Linux only.** It reads `/proc` and installs systemd user units; building it
   anywhere else fails at compile time rather than misbehaving at runtime.
-- **Source installation.** The commands above build the checked-out source with Cargo.
+- **x86_64 only, no self-update.** Release packages are x86_64 Linux; install newer releases by hand.
 - **No agent API of its own.** TaiX runs whatever CLI you already have and reads
   its terminal. It does not talk to model providers, and it holds no API keys.
 - **One tmux server.** Everything shares the socket named in `tmux_socket`; kill
